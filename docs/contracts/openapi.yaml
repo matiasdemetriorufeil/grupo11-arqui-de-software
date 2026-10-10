@@ -1,0 +1,969 @@
+openapi: 3.0.3
+
+info:
+  title: Helios — API Mayorista de Equipamiento Solar
+  version: 1.0.0
+  description: |
+    Capacidad pública que el grupo **Helios** expone para que otros sistemas coticen
+    y reserven equipamiento solar (paneles, inversores, estructuras y baterías) de
+    nuestro stock mayorista.
+
+    ## Flujo de integración
+
+    1. `GET /v1/proveedor/catalogo` — descubrir productos disponibles (paginado, filtrado y ordenado).
+    2. `POST /v1/proveedor/cotizaciones` — pedir una cotización firme por líneas y destino.
+       Devuelve `cotizacion_id`, costo unitario final, costo por Watt y `vigente_hasta`.
+    3. `POST /v1/pedidos/reservar` — reservar stock contra una cotización vigente.
+       **Requiere header `Idempotency-Key`.** Bloquea inventario por `expira_en`.
+    4. `POST /v1/pedidos/{pedido_id}/confirmar` — confirmar la reserva (dispara el cobro).
+       Si no se confirma antes de `expira_en`, la reserva expira y el stock se libera.
+
+    ## Autenticación
+
+    Todos los endpoints de negocio requieren `Authorization: Bearer <JWT>` (HS256),
+    emitido por el API Gateway de Helios a partir de credenciales `client_id`/`client_secret`
+    entregadas al grupo consumidor. El token lleva `iss` (identifica al consumidor) y
+    `scope`. Scopes: `catalogo:leer`, `cotizaciones:escribir`, `pedidos:escribir`.
+
+    ## Idempotencia
+
+    `POST /v1/pedidos/reservar` y `POST /v1/pedidos/{id}/confirmar` son idempotentes por
+    header `Idempotency-Key` (UUID v4 generado por el consumidor, único por intento lógico).
+    Reenviar la misma clave con el mismo cuerpo devuelve la **misma** representación y el
+    mismo código de estado que la primera llamada exitosa, sin crear una segunda reserva.
+    Reenviar la misma clave con un cuerpo distinto devuelve `409 CLAVE_IDEMPOTENCIA_REUSADA`.
+    Las claves se retienen 24 horas.
+
+    ## Errores
+
+    Todos los errores usan `application/problem+json` (RFC 9457) con un campo adicional
+    `codigo` estable y apto para programar contra él. Ver `docs/contracts/README.md`
+    para la tabla completa de códigos y el comportamiento esperado del consumidor.
+
+    ## Versionado
+
+    SemVer sobre la versión del contrato, con la major en la ruta (`/v1`). Dentro de `v1`
+    sólo se hacen cambios aditivos y retrocompatibles. Un cambio incompatible abre `/v2`
+    y `/v1` entra en depreciación anunciada con headers `Deprecation` y `Sunset`
+    por al menos 30 días. Detalle en `docs/adr/ADR-008-contrato-propio.md`.
+  contact:
+    name: Grupo 11 — Arquitectura de Software 2026 (UCC)
+    url: https://github.com/matiasdemetriorufeil/grupo11-arqui-de-software
+  license:
+    name: MIT
+
+servers:
+  - url: https://api.helios.example.com
+    description: Producción (nube) — URL definitiva a publicar en la Entrega 2
+  - url: http://localhost:8000
+    description: Local a través del API Gateway (docker compose up)
+  - url: http://localhost:4010
+    description: Mock del contrato (Prism) — sin lógica de negocio real
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Catálogo
+    description: Descubrimiento de productos y disponibilidad.
+  - name: Cotizaciones
+    description: Precio firme con vigencia acotada.
+  - name: Pedidos
+    description: Reserva transaccional de stock y su ciclo de vida.
+
+paths:
+  /v1/proveedor/catalogo:
+    get:
+      tags: [Catálogo]
+      summary: Buscar productos en el catálogo mayorista
+      description: |
+        Búsqueda indexada sobre el catálogo unificado. Soporta paginación, filtros de dominio
+        y ordenamiento. El índice se mantiene sincronizado por eventos ante cada cambio de
+        catálogo o de lista de precios; el retraso máximo tolerable es de 60 segundos
+        (ver `docs/ARCHITECTURE.md`, sección Búsqueda).
+      operationId: buscarCatalogo
+      security:
+        - bearerAuth: [catalogo:leer]
+      parameters:
+        - name: q
+          in: query
+          description: Texto libre sobre modelo, fabricante y tecnología.
+          schema: { type: string, maxLength: 120 }
+          example: panel 550 bifacial
+        - name: tipo
+          in: query
+          schema:
+            type: string
+            enum: [panel, inversor, estructura, bateria]
+        - name: fabricante
+          in: query
+          description: Nombre canónico del fabricante.
+          schema: { type: string }
+          example: Jinko Solar
+        - name: potencia_w_min
+          in: query
+          schema: { type: integer, minimum: 0 }
+          example: 450
+        - name: potencia_w_max
+          in: query
+          schema: { type: integer, minimum: 0 }
+          example: 600
+        - name: tecnologia_celda
+          in: query
+          schema:
+            type: string
+            enum: [mono_perc, topcon, hjt, policristalino, bifacial]
+        - name: costo_por_watt_max
+          in: query
+          description: Costo por Watt máximo en USD.
+          schema: { type: number, format: double, minimum: 0 }
+          example: 0.22
+        - name: solo_disponibles
+          in: query
+          description: Si es `true`, excluye productos sin stock libre.
+          schema: { type: boolean, default: true }
+        - name: orden
+          in: query
+          description: Criterio de ordenamiento.
+          schema:
+            type: string
+            enum: [costo_por_watt_asc, costo_por_watt_desc, potencia_w_desc, relevancia]
+            default: costo_por_watt_asc
+        - $ref: '#/components/parameters/Pagina'
+        - $ref: '#/components/parameters/TamanioPagina'
+      responses:
+        '200':
+          description: Resultados de búsqueda.
+          headers:
+            X-Cache:
+              description: '`HIT` o `MISS` sobre la caché de consultas.'
+              schema: { type: string, enum: [HIT, MISS] }
+            X-Indice-Actualizado-En:
+              description: Instante de la última proyección aplicada al índice.
+              schema: { type: string, format: date-time }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginaDeProductos' }
+        '400': { $ref: '#/components/responses/SolicitudInvalida' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/SinPermisos' }
+        '429': { $ref: '#/components/responses/DemasiadasSolicitudes' }
+        '503': { $ref: '#/components/responses/ServicioNoDisponible' }
+
+  /v1/proveedor/disponibilidad:
+    get:
+      tags: [Catálogo]
+      summary: Consultar disponibilidad puntual de un producto
+      description: |
+        Lectura directa contra el inventario (no contra el índice de búsqueda), pensada para
+        que el consumidor valide una cantidad antes de cotizar. Es un dato **informativo**:
+        no reserva stock y puede cambiar entre esta llamada y la reserva.
+      operationId: consultarDisponibilidad
+      security:
+        - bearerAuth: [catalogo:leer]
+      parameters:
+        - name: sku
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Sku' }
+        - name: cantidad
+          in: query
+          required: true
+          description: Cantidad de unidades a verificar.
+          schema: { type: integer, minimum: 1 }
+          example: 120
+      responses:
+        '200':
+          description: Disponibilidad informativa.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Disponibilidad' }
+              example:
+                sku: HEL-PAN-550-JKM
+                cantidad_solicitada: 120
+                hay_disponible: true
+                unidades_libres: 1840
+                multiplo_de_embalaje: 36
+                consultado_en: '2026-10-09T14:22:05Z'
+        '400': { $ref: '#/components/responses/SolicitudInvalida' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '429': { $ref: '#/components/responses/DemasiadasSolicitudes' }
+        '503': { $ref: '#/components/responses/ServicioNoDisponible' }
+
+  /v1/proveedor/cotizaciones:
+    post:
+      tags: [Cotizaciones]
+      summary: Solicitar una cotización firme
+      description: |
+        Calcula el costo unitario final por línea (precio de lista del fabricante elegido,
+        bonificación por volumen, flete al destino e impuestos) y devuelve un `cotizacion_id`
+        con vigencia acotada. Para cada línea se elige el fabricante con **mejor costo por Watt**
+        entre los que tienen stock, salvo que el consumidor fije `fabricante_preferido`.
+
+        La cotización es el insumo obligatorio de `POST /v1/pedidos/reservar`: pasado
+        `vigente_hasta` la reserva falla con `409 COTIZACION_EXPIRADA` y hay que recotizar.
+      operationId: crearCotizacion
+      security:
+        - bearerAuth: [cotizaciones:escribir]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SolicitudDeCotizacion' }
+            example:
+              destino:
+                provincia: Córdoba
+                localidad: Villa María
+                codigo_postal: '5900'
+              moneda: USD
+              lineas:
+                - sku: HEL-PAN-550-JKM
+                  cantidad: 108
+                - sku: HEL-INV-50K-SUN
+                  cantidad: 2
+                  fabricante_preferido: Sungrow
+      responses:
+        '201':
+          description: Cotización creada.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cotizacion' }
+        '400': { $ref: '#/components/responses/SolicitudInvalida' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/SinPermisos' }
+        '422': { $ref: '#/components/responses/ReglaDeNegocioIncumplida' }
+        '429': { $ref: '#/components/responses/DemasiadasSolicitudes' }
+        '503': { $ref: '#/components/responses/ServicioNoDisponible' }
+
+  /v1/proveedor/cotizaciones/{cotizacion_id}:
+    get:
+      tags: [Cotizaciones]
+      summary: Consultar una cotización
+      operationId: obtenerCotizacion
+      security:
+        - bearerAuth: [catalogo:leer]
+      parameters:
+        - name: cotizacion_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Cotización encontrada. `estado` indica si sigue siendo usable.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cotizacion' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '429': { $ref: '#/components/responses/DemasiadasSolicitudes' }
+
+  /v1/pedidos/reservar:
+    post:
+      tags: [Pedidos]
+      summary: Reservar stock contra una cotización vigente
+      description: |
+        Operación principal del sistema y la única con garantías de consistencia estricta.
+        Es **todo o nada**: si una sola línea no puede reservarse, no se reserva ninguna.
+
+        Reglas que se validan, en orden:
+
+        | # | Regla | Error |
+        |---|-------|-------|
+        | 1 | La cotización existe, pertenece al consumidor y está vigente | `409 COTIZACION_EXPIRADA` |
+        | 2 | El cuerpo coincide línea por línea con la cotización | `422 LINEAS_NO_COINCIDEN` |
+        | 3 | Cada cantidad es múltiplo del embalaje del producto | `422 CANTIDAD_NO_MULTIPLO_EMBALAJE` |
+        | 4 | El monto total alcanza el mínimo mayorista | `422 MONTO_MINIMO_NO_ALCANZADO` |
+        | 5 | El consumidor no excede su cupo vigente | `422 CUPO_CLIENTE_EXCEDIDO` |
+        | 6 | Hay stock libre suficiente en el depósito asignado | `409 STOCK_INSUFICIENTE` |
+
+        Al reservar se descuenta stock libre, se congela el precio de la cotización y se fija
+        `expira_en` (15 minutos por defecto). Si la reserva deja alguna existencia por debajo
+        de su punto de reposición, se emite internamente `StockBajoMinimoEvent` y se genera
+        una orden de reposición al fabricante más barato por Watt; eso es transparente
+        para el consumidor.
+      operationId: reservarPedido
+      security:
+        - bearerAuth: [pedidos:escribir]
+      parameters:
+        - $ref: '#/components/parameters/ClaveIdempotencia'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SolicitudDeReserva' }
+            example:
+              cotizacion_id: 7f1c9d3e-5b42-4a1f-9d0e-2c7b8a6f4e11
+              referencia_externa: OC-2026-000481
+              lineas:
+                - sku: HEL-PAN-550-JKM
+                  cantidad: 108
+                - sku: HEL-INV-50K-SUN
+                  cantidad: 2
+      responses:
+        '201':
+          description: Reserva creada. El stock queda bloqueado hasta `expira_en`.
+          headers:
+            Location:
+              description: URL del pedido creado.
+              schema: { type: string, format: uri }
+            Idempotency-Replayed:
+              description: '`true` si esta respuesta es la repetición de una llamada anterior.'
+              schema: { type: boolean }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pedido' }
+        '400': { $ref: '#/components/responses/SolicitudInvalida' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { $ref: '#/components/responses/SinPermisos' }
+        '409':
+          description: |
+            Conflicto con el estado actual. Códigos posibles: `STOCK_INSUFICIENTE`,
+            `COTIZACION_EXPIRADA`, `CLAVE_IDEMPOTENCIA_REUSADA`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problema' }
+              example:
+                type: https://api.helios.example.com/problemas/stock-insuficiente
+                title: Stock insuficiente
+                status: 409
+                codigo: STOCK_INSUFICIENTE
+                detail: No hay unidades libres suficientes para una o más líneas del pedido.
+                instance: /v1/pedidos/reservar
+                trace_id: 4bf92f3577b34da6a3ce929d0e0e4736
+                reintentable: false
+                lineas_en_conflicto:
+                  - sku: HEL-PAN-550-JKM
+                    cantidad_solicitada: 108
+                    unidades_libres: 72
+        '422': { $ref: '#/components/responses/ReglaDeNegocioIncumplida' }
+        '429': { $ref: '#/components/responses/DemasiadasSolicitudes' }
+        '503': { $ref: '#/components/responses/ServicioNoDisponible' }
+
+  /v1/pedidos/{pedido_id}:
+    get:
+      tags: [Pedidos]
+      summary: Consultar un pedido
+      operationId: obtenerPedido
+      security:
+        - bearerAuth: [pedidos:escribir]
+      parameters:
+        - $ref: '#/components/parameters/PedidoId'
+      responses:
+        '200':
+          description: Pedido encontrado.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pedido' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '429': { $ref: '#/components/responses/DemasiadasSolicitudes' }
+    delete:
+      tags: [Pedidos]
+      summary: Cancelar una reserva y liberar el stock
+      description: |
+        Sólo se puede cancelar un pedido en estado `reservado` o `pendiente_de_pago`.
+        Cancelar es idempotente: cancelar un pedido ya `cancelado` devuelve `200`.
+      operationId: cancelarPedido
+      security:
+        - bearerAuth: [pedidos:escribir]
+      parameters:
+        - $ref: '#/components/parameters/PedidoId'
+      responses:
+        '200':
+          description: Pedido cancelado y stock liberado.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pedido' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '409':
+          description: 'El pedido no admite cancelación. Código: `ESTADO_NO_CANCELABLE`.'
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problema' }
+        '429': { $ref: '#/components/responses/DemasiadasSolicitudes' }
+
+  /v1/pedidos/{pedido_id}/confirmar:
+    post:
+      tags: [Pedidos]
+      summary: Confirmar una reserva
+      description: |
+        Convierte la reserva en pedido firme. Helios solicita la autorización de pago al
+        proveedor externo de pagos; mientras esa respuesta no llegue el pedido queda en
+        `pendiente_de_pago` **sin perder el stock reservado** (degradación controlada).
+
+        - Pago autorizado → `confirmado`.
+        - Pago rechazado → `rechazado` y el stock se libera.
+        - Proveedor de pagos no disponible → `202` con estado `pendiente_de_pago`;
+          el consumidor debe reconsultar con `GET /v1/pedidos/{id}`.
+      operationId: confirmarPedido
+      security:
+        - bearerAuth: [pedidos:escribir]
+      parameters:
+        - $ref: '#/components/parameters/PedidoId'
+        - $ref: '#/components/parameters/ClaveIdempotencia'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SolicitudDeConfirmacion' }
+            example:
+              medio_de_pago: transferencia
+              comprobante_externo: TRF-99120033
+      responses:
+        '200':
+          description: Pedido confirmado.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pedido' }
+        '202':
+          description: |
+            Confirmación aceptada pero aún no resuelta (proveedor de pagos no disponible).
+            El pedido queda en `pendiente_de_pago` y conserva el stock.
+          headers:
+            Retry-After:
+              description: Segundos sugeridos antes de reconsultar el pedido.
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pedido' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '409':
+          description: |
+            Códigos posibles: `ESTADO_NO_CONFIRMABLE` (el pedido ya no está reservado),
+            `RESERVA_EXPIRADA`, `CLAVE_IDEMPOTENCIA_REUSADA`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problema' }
+        '422': { $ref: '#/components/responses/ReglaDeNegocioIncumplida' }
+        '429': { $ref: '#/components/responses/DemasiadasSolicitudes' }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT HS256 emitido por Helios. Claims relevantes: `iss` (identificador del consumidor),
+        `exp`, `scope`. El gateway rechaza tokens vencidos o sin el scope requerido.
+
+  parameters:
+    Pagina:
+      name: pagina
+      in: query
+      description: Número de página, base 1.
+      schema: { type: integer, minimum: 1, default: 1 }
+    TamanioPagina:
+      name: tamanio_pagina
+      in: query
+      description: Resultados por página.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    PedidoId:
+      name: pedido_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ClaveIdempotencia:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID v4 único por intento lógico. Ver sección Idempotencia.
+      schema: { type: string, format: uuid }
+      example: 3d1a0d7c-8f52-4c64-9b6e-1f0a2e5c7d93
+
+  schemas:
+
+    Sku:
+      type: string
+      description: SKU canónico de Helios (unifica los códigos de los distintos fabricantes).
+      pattern: '^HEL-[A-Z]{3}-[A-Z0-9-]{3,20}$'
+      example: HEL-PAN-550-JKM
+
+    Dinero:
+      type: object
+      required: [monto, moneda]
+      properties:
+        monto:
+          type: string
+          description: Importe decimal exacto, como string para no perder precisión.
+          pattern: '^-?\d+\.\d{2}$'
+          example: '19872.00'
+        moneda:
+          type: string
+          enum: [USD, ARS]
+      example: { monto: '19872.00', moneda: USD }
+
+    Producto:
+      type: object
+      required: [sku, tipo, fabricante, modelo]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        tipo:
+          type: string
+          enum: [panel, inversor, estructura, bateria]
+        fabricante: { type: string, example: Jinko Solar }
+        modelo: { type: string, example: Tiger Neo 550W Bifacial }
+        potencia_w: { type: integer, nullable: true, example: 550 }
+        tecnologia_celda:
+          type: string
+          nullable: true
+          enum: [mono_perc, topcon, hjt, policristalino, bifacial, null]
+          example: topcon
+        eficiencia_pct: { type: number, format: double, nullable: true, example: 21.5 }
+        certificaciones:
+          type: array
+          items: { type: string }
+          example: [IEC 61215, IEC 61730, CE]
+        garantia_anios: { type: integer, nullable: true, example: 25 }
+        multiplo_de_embalaje:
+          type: integer
+          description: Unidades por pallet. Toda compra debe ser múltiplo de este valor.
+          example: 36
+        precio_unitario: { $ref: '#/components/schemas/Dinero' }
+        costo_por_watt:
+          type: number
+          format: double
+          nullable: true
+          description: Costo unitario final dividido por la potencia nominal, en USD/W.
+          example: 0.182
+        unidades_libres:
+          type: integer
+          description: Unidades sin reservar al momento de la última proyección del índice.
+          example: 1840
+
+    PaginaDeProductos:
+      type: object
+      required: [datos, paginacion]
+      properties:
+        datos:
+          type: array
+          items: { $ref: '#/components/schemas/Producto' }
+        paginacion: { $ref: '#/components/schemas/Paginacion' }
+        facetas:
+          type: object
+          description: Conteos por faceta para armar filtros en la interfaz del consumidor.
+          additionalProperties:
+            type: object
+            additionalProperties: { type: integer }
+          example:
+            fabricante: { 'Jinko Solar': 42, 'Trina Solar': 31, 'Longi': 18 }
+            tecnologia_celda: { topcon: 55, mono_perc: 36 }
+      example:
+        datos:
+          - sku: HEL-PAN-550-JKM
+            tipo: panel
+            fabricante: Jinko Solar
+            modelo: Tiger Neo 550W Bifacial
+            potencia_w: 550
+            tecnologia_celda: topcon
+            eficiencia_pct: 21.5
+            certificaciones: [IEC 61215, IEC 61730, CE]
+            garantia_anios: 25
+            multiplo_de_embalaje: 36
+            precio_unitario: { monto: '100.10', moneda: USD }
+            costo_por_watt: 0.182
+            unidades_libres: 1840
+          - sku: HEL-PAN-580-TRN
+            tipo: panel
+            fabricante: Trina Solar
+            modelo: Vertex S+ 580W
+            potencia_w: 580
+            tecnologia_celda: topcon
+            eficiencia_pct: 22.3
+            certificaciones: [IEC 61215, IEC 61730]
+            garantia_anios: 25
+            multiplo_de_embalaje: 31
+            precio_unitario: { monto: '110.20', moneda: USD }
+            costo_por_watt: 0.19
+            unidades_libres: 620
+        paginacion:
+          pagina: 1
+          tamanio_pagina: 20
+          total_resultados: 73
+          total_paginas: 4
+        facetas:
+          fabricante: { 'Jinko Solar': 42, 'Trina Solar': 31 }
+          tecnologia_celda: { topcon: 55, mono_perc: 18 }
+
+    Paginacion:
+      type: object
+      required: [pagina, tamanio_pagina, total_resultados, total_paginas]
+      properties:
+        pagina: { type: integer, example: 1 }
+        tamanio_pagina: { type: integer, example: 20 }
+        total_resultados: { type: integer, example: 73 }
+        total_paginas: { type: integer, example: 4 }
+
+    Disponibilidad:
+      type: object
+      required: [sku, cantidad_solicitada, hay_disponible, unidades_libres, consultado_en]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        cantidad_solicitada: { type: integer, example: 120 }
+        hay_disponible: { type: boolean, example: true }
+        unidades_libres: { type: integer, example: 1840 }
+        multiplo_de_embalaje: { type: integer, example: 36 }
+        consultado_en: { type: string, format: date-time }
+
+    Destino:
+      type: object
+      required: [provincia, localidad]
+      description: Destino de entrega; determina el flete incluido en el costo final.
+      properties:
+        provincia: { type: string, example: Córdoba }
+        localidad: { type: string, example: Villa María }
+        codigo_postal: { type: string, example: '5900' }
+
+    LineaSolicitada:
+      type: object
+      required: [sku, cantidad]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        cantidad:
+          type: integer
+          minimum: 1
+          description: Debe ser múltiplo de `multiplo_de_embalaje` del producto.
+          example: 108
+        fabricante_preferido:
+          type: string
+          nullable: true
+          description: Si se indica, se cotiza ese fabricante en lugar del más barato por Watt.
+          example: Sungrow
+
+    SolicitudDeCotizacion:
+      type: object
+      required: [destino, lineas]
+      properties:
+        destino: { $ref: '#/components/schemas/Destino' }
+        moneda:
+          type: string
+          enum: [USD, ARS]
+          default: USD
+        lineas:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: '#/components/schemas/LineaSolicitada' }
+
+    LineaCotizada:
+      type: object
+      required: [sku, cantidad, precio_unitario, subtotal]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        modelo: { type: string, example: Tiger Neo 550W Bifacial }
+        fabricante_elegido: { type: string, example: Jinko Solar }
+        motivo_eleccion:
+          type: string
+          enum: [mejor_costo_por_watt, fabricante_preferido, unico_con_stock]
+          example: mejor_costo_por_watt
+        cantidad: { type: integer, example: 108 }
+        precio_unitario: { $ref: '#/components/schemas/Dinero' }
+        costo_por_watt: { type: number, format: double, nullable: true, example: 0.182 }
+        bonificacion_por_volumen_pct: { type: number, format: double, example: 4.5 }
+        subtotal: { $ref: '#/components/schemas/Dinero' }
+
+    Cotizacion:
+      type: object
+      required: [cotizacion_id, estado, lineas, total, vigente_hasta, emitida_en]
+      properties:
+        cotizacion_id: { type: string, format: uuid }
+        estado:
+          type: string
+          enum: [vigente, expirada, consumida]
+        lineas:
+          type: array
+          items: { $ref: '#/components/schemas/LineaCotizada' }
+        subtotal_mercaderia: { $ref: '#/components/schemas/Dinero' }
+        flete: { $ref: '#/components/schemas/Dinero' }
+        impuestos: { $ref: '#/components/schemas/Dinero' }
+        total: { $ref: '#/components/schemas/Dinero' }
+        emitida_en: { type: string, format: date-time }
+        vigente_hasta:
+          type: string
+          format: date-time
+          description: Pasado este instante la cotización no sirve para reservar.
+      example:
+        cotizacion_id: 7f1c9d3e-5b42-4a1f-9d0e-2c7b8a6f4e11
+        estado: vigente
+        lineas:
+          - sku: HEL-PAN-550-JKM
+            modelo: Tiger Neo 550W Bifacial
+            fabricante_elegido: Jinko Solar
+            motivo_eleccion: mejor_costo_por_watt
+            cantidad: 108
+            precio_unitario: { monto: '100.10', moneda: USD }
+            costo_por_watt: 0.182
+            bonificacion_por_volumen_pct: 4.5
+            subtotal: { monto: '10810.80', moneda: USD }
+          - sku: HEL-INV-50K-SUN
+            modelo: SG50CX 50kW
+            fabricante_elegido: Sungrow
+            motivo_eleccion: fabricante_preferido
+            cantidad: 2
+            precio_unitario: { monto: '3180.00', moneda: USD }
+            costo_por_watt: 0.0636
+            bonificacion_por_volumen_pct: 0
+            subtotal: { monto: '6360.00', moneda: USD }
+        subtotal_mercaderia: { monto: '17170.80', moneda: USD }
+        flete: { monto: '980.00', moneda: USD }
+        impuestos: { monto: '1721.20', moneda: USD }
+        total: { monto: '19872.00', moneda: USD }
+        emitida_en: '2026-10-09T14:22:05Z'
+        vigente_hasta: '2026-10-09T14:37:05Z'
+
+    SolicitudDeReserva:
+      type: object
+      required: [cotizacion_id, lineas]
+      properties:
+        cotizacion_id:
+          type: string
+          format: uuid
+          description: Cotización vigente contra la que se reserva.
+        referencia_externa:
+          type: string
+          maxLength: 64
+          nullable: true
+          description: Identificador del pedido en el sistema del consumidor (para conciliación).
+          example: OC-2026-000481
+        lineas:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/LineaSolicitada' }
+
+    SolicitudDeConfirmacion:
+      type: object
+      required: [medio_de_pago]
+      properties:
+        medio_de_pago:
+          type: string
+          enum: [transferencia, cuenta_corriente, tarjeta]
+        comprobante_externo:
+          type: string
+          nullable: true
+          maxLength: 64
+          example: TRF-99120033
+
+    LineaDePedido:
+      type: object
+      required: [sku, cantidad, precio_unitario_congelado, subtotal]
+      properties:
+        sku: { $ref: '#/components/schemas/Sku' }
+        modelo: { type: string, example: Tiger Neo 550W Bifacial }
+        cantidad: { type: integer, example: 108 }
+        deposito: { type: string, example: DEP-CBA-01 }
+        precio_unitario_congelado: { $ref: '#/components/schemas/Dinero' }
+        subtotal: { $ref: '#/components/schemas/Dinero' }
+
+    Pedido:
+      type: object
+      required: [pedido_id, estado, lineas, total, creado_en]
+      properties:
+        pedido_id: { type: string, format: uuid }
+        estado:
+          type: string
+          description: |
+            `reservado` → stock bloqueado, esperando confirmación.
+            `pendiente_de_pago` → confirmado por el consumidor, esperando al proveedor de pagos.
+            `confirmado` → pago autorizado, pedido firme.
+            `rechazado` → pago rechazado, stock liberado.
+            `cancelado` → cancelado por el consumidor, stock liberado.
+            `expirado` → no se confirmó antes de `expira_en`, stock liberado.
+          enum: [reservado, pendiente_de_pago, confirmado, rechazado, cancelado, expirado]
+        cotizacion_id: { type: string, format: uuid }
+        referencia_externa: { type: string, nullable: true, example: OC-2026-000481 }
+        lineas:
+          type: array
+          items: { $ref: '#/components/schemas/LineaDePedido' }
+        total: { $ref: '#/components/schemas/Dinero' }
+        creado_en: { type: string, format: date-time }
+        expira_en:
+          type: string
+          format: date-time
+          nullable: true
+          description: Sólo presente mientras el pedido mantiene stock bloqueado sin confirmar.
+      example:
+        pedido_id: c0a80101-9f1b-4d7a-8e2c-6b5f3a1d4e88
+        estado: reservado
+        cotizacion_id: 7f1c9d3e-5b42-4a1f-9d0e-2c7b8a6f4e11
+        referencia_externa: OC-2026-000481
+        lineas:
+          - sku: HEL-PAN-550-JKM
+            modelo: Tiger Neo 550W Bifacial
+            cantidad: 108
+            deposito: DEP-CBA-01
+            precio_unitario_congelado: { monto: '100.10', moneda: USD }
+            subtotal: { monto: '10810.80', moneda: USD }
+          - sku: HEL-INV-50K-SUN
+            modelo: SG50CX 50kW
+            cantidad: 2
+            deposito: DEP-CBA-01
+            precio_unitario_congelado: { monto: '3180.00', moneda: USD }
+            subtotal: { monto: '6360.00', moneda: USD }
+        total: { monto: '19872.00', moneda: USD }
+        creado_en: '2026-10-09T14:24:11Z'
+        expira_en: '2026-10-09T14:39:11Z'
+
+    Problema:
+      type: object
+      description: Error en formato RFC 9457 con el campo extra `codigo`.
+      required: [type, title, status, codigo]
+      properties:
+        type: { type: string, format: uri, example: 'https://api.helios.example.com/problemas/stock-insuficiente' }
+        title: { type: string, example: Stock insuficiente }
+        status: { type: integer, example: 409 }
+        codigo:
+          type: string
+          description: Código estable de error. Programar contra este campo, no contra `title`.
+          example: STOCK_INSUFICIENTE
+        detail: { type: string, example: No hay unidades libres suficientes para una o más líneas del pedido. }
+        instance: { type: string, example: /v1/pedidos/reservar }
+        trace_id:
+          type: string
+          description: Identificador de traza para correlacionar con nuestros logs al reportar un problema.
+          example: 4bf92f3577b34da6a3ce929d0e0e4736
+        reintentable:
+          type: boolean
+          description: Si es `true`, reintentar con la misma `Idempotency-Key` puede tener éxito.
+          example: false
+        errores_de_validacion:
+          type: array
+          description: Presente en `400`/`422`, un ítem por campo o regla incumplida.
+          items:
+            type: object
+            properties:
+              campo: { type: string, example: 'lineas[0].cantidad' }
+              mensaje: { type: string, example: 'Debe ser múltiplo de 36 (unidades por pallet).' }
+        lineas_en_conflicto:
+          type: array
+          description: Presente en `409 STOCK_INSUFICIENTE`.
+          items:
+            type: object
+            properties:
+              sku: { $ref: '#/components/schemas/Sku' }
+              cantidad_solicitada: { type: integer }
+              unidades_libres: { type: integer }
+
+  responses:
+    SolicitudInvalida:
+      description: Sintaxis o tipos inválidos en la solicitud. No reintentar sin corregir.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problema' }
+          example:
+            type: https://api.helios.example.com/problemas/solicitud-invalida
+            title: Solicitud inválida
+            status: 400
+            codigo: SOLICITUD_INVALIDA
+            detail: El cuerpo de la solicitud no cumple el esquema del contrato.
+            instance: /v1/proveedor/cotizaciones
+            trace_id: 1a2b3c4d5e6f70819a2b3c4d5e6f7081
+            reintentable: false
+            errores_de_validacion:
+              - campo: lineas
+                mensaje: Debe contener al menos un elemento.
+
+    NoAutenticado:
+      description: Token ausente, mal formado o vencido.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problema' }
+          example:
+            type: https://api.helios.example.com/problemas/no-autenticado
+            title: No autenticado
+            status: 401
+            codigo: NO_AUTENTICADO
+            detail: El header Authorization no contiene un JWT válido y vigente.
+            instance: /v1/pedidos/reservar
+            reintentable: false
+
+    SinPermisos:
+      description: El token es válido pero no tiene el scope requerido.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problema' }
+          example:
+            type: https://api.helios.example.com/problemas/sin-permisos
+            title: Sin permisos
+            status: 403
+            codigo: SCOPE_INSUFICIENTE
+            detail: La operación requiere el scope pedidos:escribir.
+            instance: /v1/pedidos/reservar
+            reintentable: false
+
+    NoEncontrado:
+      description: El recurso no existe o no pertenece al consumidor autenticado.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problema' }
+          example:
+            type: https://api.helios.example.com/problemas/no-encontrado
+            title: Recurso no encontrado
+            status: 404
+            codigo: NO_ENCONTRADO
+            detail: No existe un pedido con ese identificador para este consumidor.
+            instance: /v1/pedidos/c0a80101-9f1b-4d7a-8e2c-6b5f3a1d4e88
+            reintentable: false
+
+    ReglaDeNegocioIncumplida:
+      description: |
+        La solicitud es sintácticamente válida pero viola una regla de negocio.
+        Códigos: `CANTIDAD_NO_MULTIPLO_EMBALAJE`, `MONTO_MINIMO_NO_ALCANZADO`,
+        `CUPO_CLIENTE_EXCEDIDO`, `LINEAS_NO_COINCIDEN`, `SKU_DESCONTINUADO`.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problema' }
+          example:
+            type: https://api.helios.example.com/problemas/regla-de-negocio
+            title: Regla de negocio incumplida
+            status: 422
+            codigo: CANTIDAD_NO_MULTIPLO_EMBALAJE
+            detail: Las cantidades mayoristas deben ser múltiplos de la unidad de embalaje.
+            instance: /v1/pedidos/reservar
+            trace_id: 9f8e7d6c5b4a39281716253443526170
+            reintentable: false
+            errores_de_validacion:
+              - campo: lineas[0].cantidad
+                mensaje: Debe ser múltiplo de 36 (unidades por pallet).
+
+    DemasiadasSolicitudes:
+      description: Se excedió el límite de tasa del consumidor (60 req/min por defecto).
+      headers:
+        Retry-After:
+          description: Segundos a esperar antes de reintentar.
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problema' }
+          example:
+            type: https://api.helios.example.com/problemas/limite-de-tasa
+            title: Demasiadas solicitudes
+            status: 429
+            codigo: LIMITE_DE_TASA_EXCEDIDO
+            detail: Se excedió el límite de 60 solicitudes por minuto.
+            instance: /v1/proveedor/catalogo
+            reintentable: true
+
+    ServicioNoDisponible:
+      description: |
+        Helios no puede atender la operación en este momento (dependencia caída o
+        circuito abierto). **Reintentable** con backoff exponencial.
+      headers:
+        Retry-After:
+          description: Segundos sugeridos antes de reintentar.
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problema' }
+          example:
+            type: https://api.helios.example.com/problemas/servicio-no-disponible
+            title: Servicio no disponible
+            status: 503
+            codigo: SERVICIO_NO_DISPONIBLE
+            detail: El servicio de precios no está disponible. Reintentar con backoff.
+            instance: /v1/proveedor/cotizaciones
+            trace_id: 5e6f708192a3b4c5d6e7f8091a2b3c4d
+            reintentable: true
