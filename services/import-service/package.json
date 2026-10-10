@@ -1,0 +1,20 @@
+{
+  "name": "@helios/import-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ingesta y normalizacion de listas de precios de fabricantes",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pino": "^9.5.0",
+    "pino-http": "^10.3.0"
+  }
+}
