@@ -10,10 +10,12 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:integracion": "node --test test/*.integracion.test.js"
   },
   "dependencies": {
     "express": "^4.21.2",
+    "pg": "^8.13.1",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0"
   }

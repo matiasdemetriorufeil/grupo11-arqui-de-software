@@ -9,7 +9,7 @@ nada de eso entra al dominio.
 
 | Adaptador | Puerto que implementa | Estado | Entrega |
 |---|---|---|---|
-| `repositorio-postgres.js` | `RepositorioDeStock` | pendiente | 2 |
+| `repositorio-postgres.js` | `RepositorioDeStock` | **listo** — falta conectarlo a las rutas | 2 |
 | `precios-http.js` | `ServicioDePrecios` | pendiente | 2 |
 | `pagos-proveedor-http.js` | `ProveedorDePagos` | pendiente | Presentación |
 | `publicador-rabbitmq.js` | `PublicadorDeEventos` | pendiente | 2 |
@@ -25,6 +25,24 @@ hace `COMMIT`/`ROLLBACK`. El aislamiento es `READ COMMITTED`: no hace falta más
 porque la exclusión mutua la da `SELECT ... FOR UPDATE` sobre las existencias.
 `bloquearExistenciasPorSku` ordena siempre por `(producto_id, deposito_id)`, que
 es lo que evita deadlocks entre pedidos con las mismas líneas en otro orden.
+
+Dos decisiones que se tomaron al implementarlo, porque el esquema no las fijaba:
+
+- **Depósito asignado.** Un SKU puede tener existencia en varios depósitos, pero
+  la reserva trabaja con una existencia por SKU. El adaptador bloquea sólo las
+  del depósito configurado en `DEPOSITO_ASIGNADO` (por defecto `DEP-CBA-01`),
+  según el supuesto 6 de `SPEC.md`. Asignar el depósito por destino del pedido
+  es un cambio dentro del adaptador.
+- **Cupo por cliente (R4.5).** No hay tabla de cupos: el cupo usado se calcula
+  sumando las líneas de las reservas del cliente dentro de `VENTANA_CUPO_HORAS`
+  (24 por defecto) que no terminaron rechazadas, canceladas ni expiradas. El
+  máximo es `CUPO_UNIDADES_POR_CLIENTE` (5000). Para que dos pedidos simultáneos
+  del mismo cliente sobre SKUs distintos no pasen los dos, se toma un
+  `pg_advisory_xact_lock` por cliente, siempre después de los locks de
+  existencia.
+
+El libro mayor guarda el delta con signo sobre lo reservado: `reserva` +N,
+`liberacion` -N.
 
 **`precios-http.js`** — `fetch` con `AbortSignal.timeout(2000)`, un único
 reintento para errores de red y `5xx` (nunca para `4xx`), y circuit breaker que

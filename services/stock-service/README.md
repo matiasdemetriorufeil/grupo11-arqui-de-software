@@ -114,6 +114,16 @@ los dos clientes creyendo que simplifica — ver
 npm install && npm test        # 14 tests, sin infraestructura
 ```
 
+Los tests de integración del adaptador PostgreSQL necesitan una base. Cada
+corrida crea una base descartable con `db/init/*.sql` y la borra al terminar:
+
+```bash
+docker compose up -d postgres-stock
+TEST_DATABASE_URL=postgres://helios:helios_dev@localhost:5434/helios_stock   npm run test:integracion
+```
+
+Sin `TEST_DATABASE_URL`, `npm test` los saltea.
+
 ## Estado
 
 | Parte | Estado |
@@ -124,4 +134,5 @@ npm install && npm test        # 14 tests, sin infraestructura
 | Endpoints del contrato | Responden `501` apuntando al mock |
 | Validación de `Idempotency-Key` | Implementada |
 | Simulador de reposición (`/interno/stock/simular-reposicion`) | Implementado |
-| Adaptadores (PostgreSQL, RabbitMQ, HTTP saliente) | Entrega 2 — ver [`src/adapters/`](src/adapters/README.md) |
+| Adaptador PostgreSQL (`RepositorioDeStock`) | **Implementado y testeado contra la base** |
+| Adaptadores RabbitMQ y HTTP saliente | Entrega 2 — ver [`src/adapters/`](src/adapters/README.md) |
