@@ -137,4 +137,5 @@ Sin `TEST_DATABASE_URL`, `npm test` los saltea.
 | Validación de `Idempotency-Key` | Implementada |
 | Simulador de reposición (`/interno/stock/simular-reposicion`) | Implementado |
 | Adaptador PostgreSQL (`RepositorioDeStock`) | **Implementado y testeado contra la base** |
-| Adaptadores RabbitMQ y HTTP saliente | Entrega 2 — ver [`src/adapters/`](src/adapters/README.md) |
+| Cliente de `pricing-search-service` (timeout, reintento, circuit breaker) | **Implementado y testeado** |
+| Adaptadores RabbitMQ y proveedor de pagos | Pendientes — ver [`src/adapters/`](src/adapters/README.md) |
