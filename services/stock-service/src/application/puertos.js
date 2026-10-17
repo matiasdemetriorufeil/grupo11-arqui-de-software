@@ -53,10 +53,13 @@
  * después de N fallas consecutivas. Ver docs/adr/ADR-005-comunicacion.md.
  *
  * @typedef {object} ServicioDePrecios
- * @property {(cotizacionId: string, ctx: {consumidor: string}) => Promise<object|null>} obtenerCotizacion
- * @property {(sku: string) => Promise<{fabricante: string, costo_unitario: number, costo_por_watt: number, origen: 'ranking_vigente'|'ultimo_ranking_en_cache'}|null>} mejorFabricantePorCostoPorWatt
- *   Para la orden de reposición. Si el ranking no está disponible devuelve null:
- *   la reposición se registra sin fabricante en lugar de abortar la reserva.
+ * @property {(cotizacionId: string, ctx: {consumidor: string, correlationId?: string}) => Promise<object|null>} obtenerCotizacion
+ *   null si la cotización no existe para ese consumidor. Si pricing no responde,
+ *   lanza SERVICIO_NO_DISPONIBLE: sin precio firme no se reserva.
+ * @property {(sku: string, ctx?: {correlationId?: string}) => Promise<{fabricante: string, costo_unitario: number, costo_por_watt: number, origen: 'ranking_vigente'|'ultimo_ranking_en_cache'}|null>} mejorFabricantePorCostoPorWatt
+ *   Para la orden de reposición. NUNCA lanza: si el ranking no está disponible
+ *   devuelve el último conocido o null, y la reposición se registra igual en
+ *   lugar de abortar la reserva.
  */
 
 /**

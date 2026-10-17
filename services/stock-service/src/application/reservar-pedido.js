@@ -52,7 +52,7 @@ const MONTO_MINIMO_POR_DEFECTO = 5000;
  * @returns {(solicitud: object) => Promise<{estado: number, cuerpo: object, repetida: boolean}>}
  */
 export function crearReservarPedido({ repositorio, precios, eventos, reloj = () => new Date() }) {
-  return async function reservarPedido({ consumidor, claveIdempotencia, cuerpo }) {
+  return async function reservarPedido({ consumidor, claveIdempotencia, cuerpo, correlationId }) {
     const huella = huellaDelCuerpo(cuerpo);
 
     // --- Paso 1: ¿esta operación ya se ejecutó? ----------------------------
@@ -73,7 +73,7 @@ export function crearReservarPedido({ repositorio, precios, eventos, reloj = () 
     // Llamada síncrona a pricing-search-service con timeout y circuit breaker
     // (el adaptador los implementa). Si el circuito está abierto no se degrada:
     // sin precio firme no se puede reservar, así que se devuelve 503.
-    const cotizacion = await precios.obtenerCotizacion(cuerpo.cotizacion_id, { consumidor });
+    const cotizacion = await precios.obtenerCotizacion(cuerpo.cotizacion_id, { consumidor, correlationId });
     if (!cotizacion) {
       throw new ErrorDeDominio('NO_ENCONTRADO', 'La cotización no existe para este consumidor.');
     }
@@ -125,7 +125,9 @@ export function crearReservarPedido({ repositorio, precios, eventos, reloj = () 
 
       // Consecuencia de negocio: órdenes de reposición al fabricante más barato.
       for (const reposicion of decision.plan.reposiciones) {
-        const mejor = await precios.mejorFabricantePorCostoPorWatt(reposicion.sku).catch(() => null);
+        const mejor = await precios
+          .mejorFabricantePorCostoPorWatt(reposicion.sku, { correlationId })
+          .catch(() => null);
         await tx.registrarOrdenDeReposicion({
           ...reposicion,
           fabricante_elegido: mejor?.fabricante ?? null,
