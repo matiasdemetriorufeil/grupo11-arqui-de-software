@@ -242,6 +242,8 @@ services:
       PROVEEDOR_PAGOS_URL: ${PROVEEDOR_PAGOS_URL:-http://mock-contrato:4010}
       TIMEOUT_PROVEEDOR_MS: ${TIMEOUT_PROVEEDOR_MS:-2000}
       MINUTOS_VIGENCIA_RESERVA: ${MINUTOS_VIGENCIA_RESERVA:-15}
+      # Cada cuánto corre el job que expira las reservas vencidas (R4.11).
+      SEGUNDOS_ENTRE_EXPIRACIONES: ${SEGUNDOS_ENTRE_EXPIRACIONES:-30}
     ports:
       - '3004:3004'
     depends_on:

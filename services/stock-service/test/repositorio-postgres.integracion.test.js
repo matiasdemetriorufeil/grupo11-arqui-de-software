@@ -24,6 +24,7 @@ import pg from 'pg';
 
 import { crearRepositorioPostgres } from '../src/adapters/repositorio-postgres.js';
 import { crearReservarPedido } from '../src/application/reservar-pedido.js';
+import { crearExpirarReservas } from '../src/application/expirar-reservas.js';
 
 const URL_ADMIN = process.env.TEST_DATABASE_URL;
 const DIR_INIT = new URL('../db/init/', import.meta.url);
@@ -72,7 +73,7 @@ describe('repositorio PostgreSQL', { skip: !URL_ADMIN && 'TEST_DATABASE_URL no d
   }
 
   /** Arma el caso de uso real con dobles de precios y eventos. */
-  function reservarPedidoCon({ cotizacion }) {
+  function reservarPedidoCon({ cotizacion, reloj }) {
     return crearReservarPedido({
       repositorio,
       precios: {
@@ -80,7 +81,28 @@ describe('repositorio PostgreSQL', { skip: !URL_ADMIN && 'TEST_DATABASE_URL no d
         mejorFabricantePorCostoPorWatt: async () => null,
       },
       eventos: { vaciarOutboxEnSegundoPlano: () => {} },
+      ...(reloj ? { reloj } : {}),
     });
+  }
+
+  /** Se arma al llamarlo: `repositorio` recién existe después del before(). */
+  function expirarReservas() {
+    return crearExpirarReservas({ repositorio, eventos: { vaciarOutboxEnSegundoPlano: () => {} } })();
+  }
+
+  /**
+   * Reserva hecha "hace 20 minutos": con la vigencia de 15, ya venció.
+   * HEL-INV-36K-HWI tiene 18 físicas y embalaje 1.
+   */
+  async function reservaVencida(consumidor, cantidad = 4) {
+    const haceVeinte = new Date(Date.now() - 20 * 60_000);
+    const cotizacion = { ...cotizacionDe('HEL-INV-36K-HWI', cantidad, 3000), vigente_hasta: new Date(haceVeinte.getTime() + 60_000).toISOString() };
+    const { cuerpo } = await reservarPedidoCon({ cotizacion, reloj: () => haceVeinte })({
+      consumidor,
+      claveIdempotencia: randomUUID(),
+      cuerpo: { cotizacion_id: randomUUID(), lineas: [{ sku: 'HEL-INV-36K-HWI', cantidad }] },
+    });
+    return cuerpo.pedido_id;
   }
 
   function cotizacionDe(sku, cantidad, precio = 100) {
@@ -383,6 +405,61 @@ describe('repositorio PostgreSQL', { skip: !URL_ADMIN && 'TEST_DATABASE_URL no d
       [fila.sku],
     );
     assert.deepEqual(rows, [{ cantidad: 10 }]);
+  });
+
+  // --- Expiración (R4.11) ---------------------------------------------------
+
+  test('una reserva vencida se expira: libera su stock, deja el asiento y encola el evento', async () => {
+    const antes = await existencia('HEL-INV-36K-HWI');
+    const pedidoId = await reservaVencida('cliente-que-no-confirma');
+    assert.equal((await existencia('HEL-INV-36K-HWI')).cantidad_reservada, antes.cantidad_reservada + 4);
+
+    assert.deepEqual(await expirarReservas(), { expiradas: 1, salteadas: 0, fallidas: 0 });
+
+    assert.equal((await existencia('HEL-INV-36K-HWI')).cantidad_reservada, antes.cantidad_reservada);
+    const { rows: [reserva] } = await pool.query('select estado, cerrado_en from stock.reserva where id = $1', [pedidoId]);
+    assert.equal(reserva.estado, 'expirado');
+    assert.ok(reserva.cerrado_en);
+
+    const { rows: asientos } = await pool.query(
+      'select tipo, cantidad from stock.movimiento_stock where reserva_id = $1 order by id',
+      [pedidoId],
+    );
+    assert.deepEqual(asientos, [
+      { tipo: 'reserva', cantidad: 4 },
+      { tipo: 'liberacion', cantidad: -4 },
+    ]);
+    const { rows: eventos } = await pool.query(
+      `select cuerpo from stock.outbox_evento where tipo = 'pedido.expirado' and clave_agregado = $1`,
+      [pedidoId],
+    );
+    assert.deepEqual(eventos[0].cuerpo.lineas, [{ sku: 'HEL-INV-36K-HWI', cantidad: 4 }]);
+
+    // Una segunda pasada no encuentra nada: no libera dos veces.
+    assert.deepEqual(await expirarReservas(), { expiradas: 0, salteadas: 0, fallidas: 0 });
+  });
+
+  test('dos jobs en paralelo expiran la reserva una sola vez y liberan el stock una sola vez', async () => {
+    const antes = await existencia('HEL-INV-36K-HWI');
+    await reservaVencida('cliente-concurrencia-job', 6);
+
+    const [a, b] = await Promise.all([expirarReservas(), expirarReservas()]);
+
+    assert.equal(a.expiradas + b.expiradas, 1);
+    assert.equal(a.fallidas + b.fallidas, 0);
+    assert.equal((await existencia('HEL-INV-36K-HWI')).cantidad_reservada, antes.cantidad_reservada);
+  });
+
+  test('un pedido pendiente_de_pago no vence: conserva el stock mientras se espera al proveedor', async () => {
+    const { rows } = await pool.query(
+      `insert into stock.reserva (consumidor, cotizacion_id, estado, moneda, total, expira_en)
+       values ('cliente-pagando', $1, 'pendiente_de_pago', 'USD', 0, now() - interval '1 hour') returning id`,
+      [randomUUID()],
+    );
+    const vencidas = await repositorio.reservasVencidas();
+    assert.ok(!vencidas.some((r) => r.id === rows[0].id));
+    // Se borra para no afectar a los tests que siguen.
+    await pool.query('delete from stock.reserva where id = $1', [rows[0].id]);
   });
 
   test('reservasVencidas devuelve las reservas vencidas con sus líneas y existencias', async () => {

@@ -23,9 +23,6 @@ import pg from 'pg';
 import { ErrorDeDominio } from '../problema.js';
 import { ClaveIdempotenciaEnCarrera } from '../application/errores.js';
 
-/** Estados en los que una reserva sigue ocupando stock y cupo. */
-const ESTADOS_VIGENTES = ['reservado', 'pendiente_de_pago'];
-
 /** Estados que NO cuentan para el cupo: la reserva no llegó a concretarse. */
 const ESTADOS_SIN_EFECTO = ['rechazado', 'cancelado', 'expirado'];
 
@@ -136,6 +133,10 @@ export function crearRepositorioPostgres({
     async reservasVencidas() {
       // Incluye las líneas con su existencia: el job de expiración las necesita
       // para liberar exactamente lo que se comprometió.
+      //
+      // Sólo `reservado`. Un pedido `pendiente_de_pago` ya fue confirmado por el
+      // cliente y espera al proveedor de pagos: si se expirara, una caída de un
+      // tercero le haría perder la compra (SPEC R5.6).
       const { rows } = await pool.query(
         `select r.id, r.consumidor, r.estado, r.expira_en, r.version,
                 coalesce(
@@ -153,11 +154,10 @@ export function crearRepositorioPostgres({
            left join stock.reserva_linea l on l.reserva_id = r.id
            left join stock.existencia e
                   on e.producto_id = l.producto_id and e.deposito_id = l.deposito_id
-          where r.estado = any($1::stock.estado_reserva[])
+          where r.estado = 'reservado'
             and r.expira_en <= now()
           group by r.id
           order by r.expira_en`,
-        [ESTADOS_VIGENTES],
       );
       return rows;
     },
@@ -258,6 +258,31 @@ function transaccionSobre(cliente, { depositoAsignado, cupoUnidadesPorCliente, v
         reserva_id,
         motivo: 'Liberación de reserva',
       });
+    },
+
+    async bloquearReservaVencida(reservaId) {
+      // SKIP LOCKED: si otra instancia del job ya la está expirando, ésta la
+      // saltea en lugar de esperar. Las condiciones se vuelven a evaluar con la
+      // fila bloqueada: entre la lectura de reservasVencidas y este punto el
+      // cliente pudo haberla confirmado o cancelado.
+      const { rows } = await cliente.query(
+        `select id, consumidor, version
+           from stock.reserva
+          where id = $1 and estado = 'reservado' and expira_en <= now()
+            for update skip locked`,
+        [reservaId],
+      );
+      return rows[0] ?? null;
+    },
+
+    async marcarExpirada(reservaId) {
+      const { rowCount } = await cliente.query(
+        `update stock.reserva
+            set estado = 'expirado', cerrado_en = now(), version = version + 1
+          where id = $1 and estado = 'reservado'`,
+        [reservaId],
+      );
+      if (rowCount === 0) throw new Error(`La reserva ${reservaId} no está en estado reservado.`);
     },
 
     async registrarOrdenDeReposicion({
