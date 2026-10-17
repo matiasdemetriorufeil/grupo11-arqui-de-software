@@ -31,11 +31,16 @@ import { crearClienteElasticsearch } from './elasticsearch.js';
 import { asegurarIndice } from './projection/mapeo-indice.js';
 import { cargarDatosDemo } from './projection/datos-demo.js';
 import { crearConsultaDeRanking } from './query/ranking.js';
+import { crearClienteRedis } from './redis.js';
+import { crearRepositorioDeCotizaciones } from './query/repositorio-cotizaciones.js';
+import { crearCotizaciones } from './query/cotizaciones.js';
 
 const PUERTO = Number(process.env.PUERTO ?? 3003);
 
 const es = crearClienteElasticsearch();
+const redis = crearClienteRedis({ log });
 const mejorFabricante = crearConsultaDeRanking({ es });
+const cotizaciones = crearCotizaciones({ es, repositorio: crearRepositorioDeCotizaciones({ redis }) });
 
 const app = express();
 app.disable('x-powered-by');
@@ -58,7 +63,7 @@ app.use(
 );
 
 // Capacidad pública: catálogo y cotizaciones (docs/contracts/openapi.yaml).
-app.use('/v1', routerDeBusqueda());
+app.use('/v1', routerDeBusqueda({ cotizaciones }));
 
 // API interna para otros servicios (tráfico este-oeste, no pasa por el gateway).
 app.use(routerInterno({ mejorFabricante }));
@@ -96,7 +101,9 @@ async function prepararIndice(intento = 1) {
 for (const senal of ['SIGTERM', 'SIGINT']) {
   process.on(senal, () => {
     log.info({ senal }, 'apagado ordenado iniciado');
-    servidor.close(() => es.close().finally(() => process.exit(0)));
+    servidor.close(() =>
+      Promise.allSettled([es.close(), redis.quit()]).finally(() => process.exit(0)),
+    );
     setTimeout(() => process.exit(1), 10_000).unref();
   });
 }

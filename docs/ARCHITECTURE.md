@@ -519,6 +519,7 @@ real, que serían indistinguibles de una implementación con bugs.
    habría que pasar a Redis como backend del contador.
 5. **Elasticsearch de un solo nodo, sin seguridad.** Apropiado para desarrollo;
    el despliegue en nube necesita autenticación y al menos una réplica.
-6. **Las cotizaciones viven en `pricing-search-service` sin persistencia durable
-   todavía.** Se resuelve en la Entrega 2 decidiendo si van a Redis con TTL o a
-   una tabla propia; afecta qué pasa con una cotización si el servicio reinicia.
+6. **Las cotizaciones viven en Redis, no en una base durable.** Si Redis se
+   reinicia, las cotizaciones vigentes se pierden y el consumidor tiene que
+   recotizar. Aceptable porque una cotización dura 15 minutos y el precio que
+   importa, el de la reserva, lo congela `stock-service` en PostgreSQL.

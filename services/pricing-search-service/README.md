@@ -85,6 +85,24 @@ El índice se actualiza **ante cada cambio en los datos fuente**, consumiendo
 eventos. Una búsqueda nunca dispara trabajo de indexación. Detalle en
 [`src/projection/README.md`](src/projection/README.md).
 
+## Cotizaciones
+
+El precio sale del índice (read model), nunca de una llamada a otro servicio.
+Por línea: precio de lista del fabricante elegido, menos su bonificación base
+más la bonificación por volumen, más el flete prorrateado entre **todas** las
+unidades, más IVA. La bonificación por volumen se calcula sobre el total de
+unidades de la cotización (R4.2).
+
+| | |
+|---|---|
+| **Vigencia** | 15 minutos (`vigente_hasta`) |
+| **Almacén** | Redis, clave `cotizacion:{id}`, retenida 24 h para que un `GET` posterior responda `estado: expirada` y no `404` |
+| **Dueño** | El consumidor que la pidió (cabecera `X-Consumer-Username` que agrega el gateway). Otro consumidor recibe `404` |
+| **Total** | Suma exacta de los subtotales por línea: es lo que congela `stock-service` al reservar. Los impuestos se obtienen por diferencia para que el desglose cierre al centavo |
+| **Flete** | Tabla por provincia en [`src/query/flete.js`](src/query/flete.js), desde el depósito de Córdoba. Simplificación documentada. Una provincia desconocida se rechaza con `400`: nunca se cobra un flete inventado |
+| **Moneda** | Sólo USD: los fabricantes cotizan en USD y Helios no convierte monedas |
+| **Si Redis falla** | `503` con `Retry-After`: una cotización que no se puede guardar no sirve para reservar |
+
 ## Caché
 
 Cache-aside en Redis sobre la búsqueda de catálogo, que es el flujo de lectura
@@ -123,7 +141,7 @@ curl "http://localhost:8001/upstreams/precios-upstream/health"
 | Dependencia | Tipo | Si falla |
 |---|---|---|
 | Elasticsearch | esencial para búsqueda | `503`; `/v1/proveedor/disponibilidad` sigue funcionando porque va contra `stock-service` |
-| Redis | opcional | Se consulta Elasticsearch directo |
+| Redis | esencial para cotizar; opcional para la búsqueda | Cotizar responde `503`; la búsqueda consulta Elasticsearch directo |
 | RabbitMQ | asíncrona | El índice se congela; los eventos esperan |
 
 ## Correr los tests
@@ -151,5 +169,6 @@ TEST_ELASTICSEARCH_URL=http://localhost:9200 npm run test:integracion
 | Dos instancias con failover | **Funcionando y verificado** |
 | Índice en Elasticsearch (mapping, alias, carga de demo) | **Implementado y testeado contra Elasticsearch** |
 | `GET /interno/ranking/{sku}` (para la reposición de `stock-service`) | **Implementado** |
-| Endpoints del contrato | Responden `501` apuntando al mock |
+| `POST` y `GET /v1/proveedor/cotizaciones` | **Implementados**: precio desde el índice, guardadas en Redis |
+| `GET /v1/proveedor/catalogo` | Valida parámetros; responde `501` apuntando al mock |
 | Proyección por eventos | Entrega 2 — ver [`src/projection/`](src/projection/README.md) |
