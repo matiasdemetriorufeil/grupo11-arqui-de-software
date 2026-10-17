@@ -23,8 +23,15 @@ import { sondaDesdeUrl } from './sondas.js';
 import { middlewareDeErrores } from './problema.js';
 import { routerDePedidos } from './http/rutas-pedidos.js';
 import { routerInterno } from './http/rutas-internas.js';
+import { crearRepositorioPostgres } from './adapters/repositorio-postgres.js';
+import { crearConsultarDisponibilidad } from './application/consultar-disponibilidad.js';
 
 const PUERTO = Number(process.env.PUERTO ?? 3004);
+
+// Composición del hexágono: los adaptadores se crean acá y se inyectan en los
+// casos de uso. Es el único lugar que conoce las implementaciones concretas.
+const repositorio = crearRepositorioPostgres();
+const consultarDisponibilidad = crearConsultarDisponibilidad({ repositorio });
 
 const app = express();
 app.disable('x-powered-by');
@@ -40,7 +47,7 @@ app.use(
 );
 
 // Capacidad pública expuesta al grupo consumidor (docs/contracts/openapi.yaml).
-app.use('/v1', routerDePedidos());
+app.use('/v1', routerDePedidos({ consultarDisponibilidad }));
 
 // API interna para el frontend propio de Helios.
 app.use('/interno', routerInterno());
@@ -59,7 +66,8 @@ const servidor = app.listen(PUERTO, () => {
 for (const senal of ['SIGTERM', 'SIGINT']) {
   process.on(senal, () => {
     log.info({ senal }, 'apagado ordenado iniciado');
-    servidor.close(() => process.exit(0));
+    // Primero se terminan los pedidos en curso, después se cierra el pool.
+    servidor.close(() => repositorio.cerrar().finally(() => process.exit(0)));
     setTimeout(() => process.exit(1), 10_000).unref();
   });
 }

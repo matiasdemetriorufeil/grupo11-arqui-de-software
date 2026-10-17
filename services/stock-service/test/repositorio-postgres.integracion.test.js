@@ -114,6 +114,30 @@ describe('repositorio PostgreSQL', { skip: !URL_ADMIN && 'TEST_DATABASE_URL no d
     assert.deepEqual(filas, []);
   });
 
+  // --- Lectura informativa ---------------------------------------------------
+
+  test('existenciaPorSku lee la existencia del depósito asignado sin bloquearla', async () => {
+    // Una transacción ajena bloquea la fila con FOR UPDATE y no la suelta.
+    const bloqueante = await pool.connect();
+    try {
+      await bloqueante.query('begin');
+      await bloqueante.query(`select 1 from stock.existencia where sku = 'HEL-PAN-550-JKM' for update`);
+
+      // La lectura informativa no espera el lock: si lo esperara, este test se colgaría.
+      const fila = await repositorio.existenciaPorSku('HEL-PAN-550-JKM');
+      assert.deepEqual(fila, {
+        sku: 'HEL-PAN-550-JKM',
+        cantidad_fisica: 1840, // DEP-CBA-01; DEP-BUE-01 tiene 900 y no se suma
+        cantidad_reservada: 0,
+        multiplo_de_embalaje: 36,
+      });
+    } finally {
+      await bloqueante.query('rollback');
+      bloqueante.release();
+    }
+    assert.equal(await repositorio.existenciaPorSku('HEL-PAN-999-XXX'), null);
+  });
+
   // --- Reserva de punta a punta contra la base -----------------------------
 
   test('una reserva aprobada persiste reserva, líneas, stock, libro mayor, outbox e idempotencia', async () => {

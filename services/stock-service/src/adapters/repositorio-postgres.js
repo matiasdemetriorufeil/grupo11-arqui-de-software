@@ -20,6 +20,8 @@
 
 import pg from 'pg';
 
+import { ErrorDeDominio } from '../problema.js';
+
 /** Estados en los que una reserva sigue ocupando stock y cupo. */
 const ESTADOS_VIGENTES = ['reservado', 'pendiente_de_pago'];
 
@@ -52,13 +54,24 @@ export function crearRepositorioPostgres({
   depositoAsignado = process.env.DEPOSITO_ASIGNADO ?? 'DEP-CBA-01',
   cupoUnidadesPorCliente = Number(process.env.CUPO_UNIDADES_POR_CLIENTE ?? 5000),
   ventanaCupoHoras = Number(process.env.VENTANA_CUPO_HORAS ?? 24),
-  pool = new pg.Pool({ connectionString: urlDeConexion, max: 10, types: tipos }),
+  pool = new pg.Pool({
+    connectionString: urlDeConexion,
+    max: 10,
+    // Sin este límite, con la base caída cada pedido esperaría indefinidamente
+    // una conexión. Mejor un 503 rápido que el consumidor puede reintentar.
+    connectionTimeoutMillis: 2000,
+    types: tipos,
+  }),
 } = {}) {
   const contexto = { depositoAsignado, cupoUnidadesPorCliente, ventanaCupoHoras };
 
+  // Un pool inactivo puede perder conexiones (reinicio de la base). Sin este
+  // handler, el 'error' emitido tiraría abajo el proceso.
+  pool.on('error', () => {});
+
   return {
     async enTransaccion(trabajo) {
-      const cliente = await pool.connect();
+      const cliente = await pool.connect().catch(traducirErrorDeConexion);
       try {
         await cliente.query('begin isolation level read committed');
         const resultado = await trabajo(transaccionSobre(cliente, contexto));
@@ -70,6 +83,19 @@ export function crearRepositorioPostgres({
       } finally {
         cliente.release();
       }
+    },
+
+    async existenciaPorSku(sku) {
+      const { rows } = await pool
+        .query(
+          `select e.sku, e.cantidad_fisica, e.cantidad_reservada, e.multiplo_de_embalaje
+             from stock.existencia e
+             join stock.deposito d on d.id = e.deposito_id
+            where e.sku = $1 and d.codigo = $2 and d.activo`,
+          [sku, depositoAsignado],
+        )
+        .catch(traducirErrorDeConexion);
+      return rows[0] ?? null;
     },
 
     async buscarClaveIdempotencia(clave) {
@@ -284,4 +310,26 @@ async function moverReservado(cliente, { existencia_id, delta, tipo, reserva_id,
     [existencia_id, delta, tipo, reserva_id, motivo],
   );
   if (rowCount === 0) throw new Error(`La existencia ${existencia_id} no existe.`);
+}
+
+// Errores que significan "la base no está disponible", no "la consulta está mal":
+// red, timeout de conexión y las clases SQLSTATE 08 (conexión) y 57P (apagado).
+const CODIGOS_DE_CONEXION = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT']);
+
+function esErrorDeConexion(err) {
+  if (CODIGOS_DE_CONEXION.has(err?.code)) return true;
+  if (typeof err?.code === 'string' && (err.code.startsWith('08') || err.code.startsWith('57P'))) return true;
+  return /timeout exceeded when trying to connect|Connection terminated/i.test(err?.message ?? '');
+}
+
+/**
+ * Convierte una falla de conexión en un 503 reintentable. Cualquier otro error
+ * se propaga tal cual: un bug de SQL tiene que verse como 500, no esconderse
+ * detrás de "servicio no disponible".
+ */
+function traducirErrorDeConexion(err) {
+  if (esErrorDeConexion(err)) {
+    throw new ErrorDeDominio('SERVICIO_NO_DISPONIBLE', 'La base de inventario no está disponible.');
+  }
+  throw err;
 }

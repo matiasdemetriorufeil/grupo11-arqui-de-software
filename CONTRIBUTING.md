@@ -119,7 +119,7 @@ Antes de pedir revisión:
 
 - [ ] Los tests del servicio pasan (`npm test`).
 - [ ] `docker compose up --build` sigue levantando todo, y `./scripts/humo.sh`
-      da 18/18.
+      da 19/19.
 - [ ] Si cambió una decisión arquitectónica, el ADR está actualizado (o hay uno
       nuevo que reemplaza al anterior).
 - [ ] Si cambió el contrato público, está reflejado en `openapi.yaml`, en
