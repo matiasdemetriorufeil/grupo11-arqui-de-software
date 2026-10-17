@@ -24,14 +24,27 @@ import { middlewareDeErrores } from './problema.js';
 import { routerDePedidos } from './http/rutas-pedidos.js';
 import { routerInterno } from './http/rutas-internas.js';
 import { crearRepositorioPostgres } from './adapters/repositorio-postgres.js';
+import { crearServicioDePreciosHttp } from './adapters/precios-http.js';
 import { crearConsultarDisponibilidad } from './application/consultar-disponibilidad.js';
+import { crearReservarPedido } from './application/reservar-pedido.js';
+import { crearObtenerPedido } from './application/obtener-pedido.js';
 
 const PUERTO = Number(process.env.PUERTO ?? 3004);
 
 // Composición del hexágono: los adaptadores se crean acá y se inyectan en los
 // casos de uso. Es el único lugar que conoce las implementaciones concretas.
 const repositorio = crearRepositorioPostgres();
+const precios = crearServicioDePreciosHttp({ log });
+
+// PROVISORIO: todavía no hay publicador de RabbitMQ. Los eventos quedan en la
+// tabla outbox, escritos en la misma transacción que la reserva, y se publican
+// cuando exista el publicador. El outbox es justamente lo que hace seguro
+// diferirlo: no se pierde ninguno.
+const eventos = { vaciarOutboxEnSegundoPlano() {} };
+
 const consultarDisponibilidad = crearConsultarDisponibilidad({ repositorio });
+const reservarPedido = crearReservarPedido({ repositorio, precios, eventos });
+const obtenerPedido = crearObtenerPedido({ repositorio });
 
 const app = express();
 app.disable('x-powered-by');
@@ -47,7 +60,7 @@ app.use(
 );
 
 // Capacidad pública expuesta al grupo consumidor (docs/contracts/openapi.yaml).
-app.use('/v1', routerDePedidos({ consultarDisponibilidad }));
+app.use('/v1', routerDePedidos({ consultarDisponibilidad, reservarPedido, obtenerPedido }));
 
 // API interna para el frontend propio de Helios.
 app.use('/interno', routerInterno());

@@ -223,10 +223,17 @@ proveedor externo).
       el header. — *verificado contra el servicio en ejecución*
 - [x] La base impide `cantidad_reservada > cantidad_fisica`. — *`CHECK` en
       `001_esquema.sql`*
-- [ ] N reservas concurrentes sobre la misma existencia resultan en exactamente
-      las que el stock permite. — *Entrega 2*
-- [ ] Reintentar con la misma clave devuelve la misma reserva con
-      `Idempotency-Replayed: true`. — *Entrega 2*
+- [x] N reservas concurrentes sobre la misma existencia resultan en exactamente
+      las que el stock permite. — *6 reservas simultáneas contra PostgreSQL en
+      `repositorio-postgres.integracion.test.js`: pasa una, las otras cinco
+      reciben `STOCK_INSUFICIENTE` con las unidades libres reales*
+- [x] Reintentar con la misma clave devuelve la misma reserva con
+      `Idempotency-Replayed: true`. — *verificado a través del gateway; dos
+      reintentos simultáneos también crean una sola reserva*
+- [x] El flujo cotizar → reservar → consultar funciona de punta a punta contra
+      los servicios reales, a través del gateway.
+- [x] Con `pricing-search-service` caído, la reserva responde `503` con
+      `Retry-After` y no escribe nada. — *verificado deteniendo las dos instancias*
 - [ ] Una reserva no confirmada libera el stock a los 15 minutos. — *Entrega 2*
 
 ---
@@ -294,8 +301,13 @@ proveedor externo).
       *índice único parcial*
 - [x] La vista `existencia_disponible` marca `requiere_reposicion` correctamente.
       — *verificado: `HEL-PAN-540-LNG` con 144 libres y punto 360 → `true`*
-- [ ] Con el servicio de precios caído, la orden se registra con
-      `origen_del_precio = sin_ranking` y la reserva se completa. — *Entrega 2*
+- [x] Con el servicio de precios caído, la orden se registra con
+      `origen_del_precio = sin_ranking` y la reserva se completa. —
+      *`reservar-pedido.test.js` y `repositorio-postgres.integracion.test.js`*
+- [x] Con el ranking disponible, la orden elige al fabricante de mejor costo
+      por Watt. — *verificado de punta a punta: reservar 108 `HEL-PAN-540-LNG`
+      genera una orden de 720 unidades a Longi con `origen_del_precio =
+      ranking_vigente`*
 
 ---
 

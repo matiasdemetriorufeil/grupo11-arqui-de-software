@@ -9,8 +9,8 @@ nada de eso entra al dominio.
 
 | Adaptador | Puerto que implementa | Estado | Entrega |
 |---|---|---|---|
-| `repositorio-postgres.js` | `RepositorioDeStock` | **listo** — falta conectarlo a las rutas | 2 |
-| `precios-http.js` | `ServicioDePrecios` | **listo** — falta conectarlo a la reserva | 2 |
+| `repositorio-postgres.js` | `RepositorioDeStock` | **listo y conectado** | 2 |
+| `precios-http.js` | `ServicioDePrecios` | **listo y conectado** | 2 |
 | `circuito.js` | — (circuit breaker compartido por los adaptadores HTTP) | **listo** | 2 |
 | `pagos-proveedor-http.js` | `ProveedorDePagos` | pendiente | Presentación |
 | `publicador-rabbitmq.js` | `PublicadorDeEventos` | pendiente | 2 |
@@ -72,11 +72,11 @@ Lo que se definió al implementarlo:
   `200 { sku, fabricante, costo_unitario_final, costo_por_watt }`, o `404` si
   nadie lo vende con stock.
 
-**Punto abierto para la tarea de la reserva:** el caso de uso pide el ranking
-*dentro* de la transacción, con las existencias bloqueadas. Con pricing lento,
-eso son hasta 4 s (2 intentos de 2 s) con filas bloqueadas. Conviene resolverlo
-antes de conectar la ruta, por ejemplo pidiendo el ranking antes de abrir la
-transacción o registrando la orden sin fabricante y completándola después.
+**Ninguna llamada de red con filas bloqueadas.** El caso de uso pide la
+cotización y el ranking de todos los SKUs del pedido, en paralelo, *antes* de
+abrir la transacción. Todavía no sabe qué líneas van a cruzar el punto de
+reposición, así que pide de más; a cambio, con pricing lento el costo es
+latencia para ese pedido y no filas de stock bloqueadas para todos los demás.
 
 **`pagos-proveedor-http.js`** — se escribe contra el contrato publicado por el
 grupo proveedor asignado por la cátedra, con un test de contrato que falla si

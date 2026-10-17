@@ -27,6 +27,8 @@
  * @property {(evento: {tipo: string, clave_agregado: string, cuerpo: object}) => Promise<void>} encolarEvento
  *   Escribe en la tabla outbox, dentro de la transacción.
  * @property {(registro: object) => Promise<void>} registrarClaveIdempotencia
+ *   Si otra transacción registró la misma clave en paralelo, lanza
+ *   ClaveIdempotenciaEnCarrera (src/application/errores.js).
  */
 
 /**
@@ -38,6 +40,8 @@
  * @property {(sku: string) => Promise<{sku: string, cantidad_fisica: number, cantidad_reservada: number, multiplo_de_embalaje: number}|null>} existenciaPorSku
  *   Lectura SIN bloqueo de la existencia del depósito asignado. Sirve para
  *   consultas informativas: el valor autoritativo se relee bajo lock al reservar.
+ * @property {(id: string) => Promise<object|null>} obtenerReserva
+ *   La reserva con sus líneas, o null si no existe.
  * @property {(clave: string) => Promise<object|null>} buscarClaveIdempotencia
  * @property {() => Promise<object[]>} reservasVencidas
  *   Reservas en estado `reservado`/`pendiente_de_pago` cuyo `expira_en` ya pasó.
