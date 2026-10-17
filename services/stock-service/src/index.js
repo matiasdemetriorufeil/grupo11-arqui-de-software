@@ -28,6 +28,7 @@ import { crearServicioDePreciosHttp } from './adapters/precios-http.js';
 import { crearConsultarDisponibilidad } from './application/consultar-disponibilidad.js';
 import { crearReservarPedido } from './application/reservar-pedido.js';
 import { crearObtenerPedido } from './application/obtener-pedido.js';
+import { crearExpirarReservas } from './application/expirar-reservas.js';
 
 const PUERTO = Number(process.env.PUERTO ?? 3004);
 
@@ -45,6 +46,7 @@ const eventos = { vaciarOutboxEnSegundoPlano() {} };
 const consultarDisponibilidad = crearConsultarDisponibilidad({ repositorio });
 const reservarPedido = crearReservarPedido({ repositorio, precios, eventos });
 const obtenerPedido = crearObtenerPedido({ repositorio });
+const expirarReservas = crearExpirarReservas({ repositorio, eventos, log });
 
 const app = express();
 app.disable('x-powered-by');
@@ -67,6 +69,25 @@ app.use('/interno', routerInterno());
 
 app.use(middlewareDeErrores(log));
 
+// Job de expiración (R4.11): libera el stock de las reservas que vencieron sin
+// confirmar. Una pasada nunca se superpone con la anterior: si una tarda más
+// que el intervalo, la siguiente se saltea.
+const SEGUNDOS_ENTRE_EXPIRACIONES = Number(process.env.SEGUNDOS_ENTRE_EXPIRACIONES ?? 30);
+let expirando = false;
+const jobDeExpiracion = setInterval(async () => {
+  if (expirando) return;
+  expirando = true;
+  try {
+    const resultado = await expirarReservas();
+    if (resultado.expiradas > 0 || resultado.fallidas > 0) log.info(resultado, 'pasada de expiración de reservas');
+  } catch (err) {
+    log.warn({ err }, 'falló la pasada de expiración; se reintenta en la próxima');
+  } finally {
+    expirando = false;
+  }
+}, SEGUNDOS_ENTRE_EXPIRACIONES * 1000);
+jobDeExpiracion.unref();
+
 const servidor = app.listen(PUERTO, () => {
   log.info(
     { puerto: PUERTO, patron_interno: 'hexagonal' },
@@ -79,6 +100,7 @@ const servidor = app.listen(PUERTO, () => {
 for (const senal of ['SIGTERM', 'SIGINT']) {
   process.on(senal, () => {
     log.info({ senal }, 'apagado ordenado iniciado');
+    clearInterval(jobDeExpiracion);
     // Primero se terminan los pedidos en curso, después se cierra el pool.
     servidor.close(() => repositorio.cerrar().finally(() => process.exit(0)));
     setTimeout(() => process.exit(1), 10_000).unref();

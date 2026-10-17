@@ -26,6 +26,11 @@
  * @property {(datos: object) => Promise<void>} registrarOrdenDeReposicion
  * @property {(evento: {tipo: string, clave_agregado: string, cuerpo: object}) => Promise<void>} encolarEvento
  *   Escribe en la tabla outbox, dentro de la transacción.
+ * @property {(reservaId: string) => Promise<{id: string, consumidor: string, version: number}|null>} bloquearReservaVencida
+ *   SELECT ... FOR UPDATE SKIP LOCKED de una reserva que sigue `reservado` y
+ *   vencida. null si ya no cumple las condiciones o si otra instancia del job
+ *   la tiene tomada.
+ * @property {(reservaId: string) => Promise<void>} marcarExpirada
  * @property {(registro: object) => Promise<void>} registrarClaveIdempotencia
  *   Si otra transacción registró la misma clave en paralelo, lanza
  *   ClaveIdempotenciaEnCarrera (src/application/errores.js).
@@ -44,8 +49,9 @@
  *   La reserva con sus líneas, o null si no existe.
  * @property {(clave: string) => Promise<object|null>} buscarClaveIdempotencia
  * @property {() => Promise<object[]>} reservasVencidas
- *   Reservas en estado `reservado`/`pendiente_de_pago` cuyo `expira_en` ya pasó.
- *   Las consume el job de expiración, que libera el stock.
+ *   Reservas en estado `reservado` cuyo `expira_en` ya pasó, con sus líneas.
+ *   Las consume el job de expiración, que libera el stock. `pendiente_de_pago`
+ *   no vence: conserva el stock mientras se espera al proveedor (R5.6).
  */
 
 /**

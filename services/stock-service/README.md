@@ -81,7 +81,8 @@ La transacción hace ocho cosas o ninguna:
 | Deadlock | Orden de bloqueo fijo por `(producto_id, deposito_id)` |
 | Pedido duplicado | `PRIMARY KEY` de `clave_idempotencia`, insertada en la misma transacción |
 | Evento perdido | Outbox transaccional |
-| Stock bloqueado para siempre | `expira_en` + job de expiración |
+| Stock bloqueado para siempre | `expira_en` + job de expiración cada 30 s. Entre el vencimiento y la pasada del job, `GET /v1/pedidos/{id}` ya informa `expirado` |
+| Expirar dos veces | `FOR UPDATE SKIP LOCKED` sobre la reserva, revalidada con la fila bloqueada |
 
 El `CHECK` es lo que vuelve la sobreventa imposible **incluso ante un bug en el
 código de este servicio**. Las garantías importantes no se delegan a la
@@ -135,7 +136,7 @@ Sin `TEST_DATABASE_URL`, `npm test` los saltea.
 | `GET /v1/proveedor/disponibilidad` | **Real**, contra PostgreSQL |
 | `POST /v1/pedidos/reservar` y `GET /v1/pedidos/{id}` | **Reales**: flujo cotizar → reservar funcionando de punta a punta |
 | Confirmar y cancelar un pedido | Responden `501` apuntando al mock |
-| Job de expiración de reservas | Pendiente: hoy una reserva vencida sigue bloqueando stock |
+| Job de expiración de reservas (R4.11) | **Implementado**: cada 30 s (`SEGUNDOS_ENTRE_EXPIRACIONES`), seguro con varias instancias |
 | Publicador de eventos (outbox → RabbitMQ) | Pendiente: los eventos se acumulan en `outbox_evento` sin perderse |
 | Validación de `Idempotency-Key` | Implementada |
 | Simulador de reposición (`/interno/stock/simular-reposicion`) | Implementado |

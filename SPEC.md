@@ -234,7 +234,12 @@ proveedor externo).
       los servicios reales, a través del gateway.
 - [x] Con `pricing-search-service` caído, la reserva responde `503` con
       `Retry-After` y no escribe nada. — *verificado deteniendo las dos instancias*
-- [ ] Una reserva no confirmada libera el stock a los 15 minutos. — *Entrega 2*
+- [x] Una reserva no confirmada libera el stock a los 15 minutos. — *job de
+      expiración cada 30 s; verificado de punta a punta con la vigencia en 1
+      minuto. Dos jobs en paralelo liberan el stock una sola vez
+      (`repositorio-postgres.integracion.test.js`)*
+- [x] Un pedido `pendiente_de_pago` no vence: conserva el stock mientras se
+      espera al proveedor de pagos (R5.6).
 
 ---
 
