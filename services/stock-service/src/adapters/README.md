@@ -67,11 +67,10 @@ Lo que se definió al implementarlo:
   `X-Consumer-Username`, la misma que agrega el gateway al validar el JWT. Así
   pricing resuelve "la cotización es de este consumidor" igual para el tráfico
   externo y el interno.
-- **Endpoint de ranking que pricing tiene que exponer** (interno, no pasa por
-  el gateway): `GET /interno/ranking/{sku}` →
+- **Endpoint de ranking de pricing** (interno, no pasa por el gateway; ya
+  implementado en `pricing-search-service/src/http/rutas-internas.js`): `GET /interno/ranking/{sku}` →
   `200 { sku, fabricante, costo_unitario_final, costo_por_watt }`, o `404` si
-  nadie lo vende con stock. Se implementa del lado de pricing con
-  `elegirFabricante` de `src/query/precios.js`.
+  nadie lo vende con stock.
 
 **Punto abierto para la tarea de la reserva:** el caso de uso pide el ranking
 *dentro* de la transacción, con las existencias bloqueadas. Con pricing lento,

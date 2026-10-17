@@ -72,10 +72,30 @@ nunca dispara trabajo de indexación.
 
 | Archivo | Responsabilidad | Estado |
 |---|---|---|
+| `mapeo-indice.js` | mapping estricto, índice `helios-productos-v1` detrás del alias `helios-productos` | **Listo** |
+| `proyector.js` | datos fuente → documento del índice (función pura) | **Listo** |
+| `datos-demo.js` | carga inicial **provisoria** con productos y precios de demo | **Listo** |
 | `consumidor-eventos.js` | suscripción a RabbitMQ, idempotencia, DLQ | Entrega 2 |
-| `proyector.js` | evento → documento del índice | Entrega 2 |
-| `mapeo-indice.js` | mapping y analizadores de Elasticsearch | Entrega 2 |
 | `reconstruccion.js` | reindexado completo con alias | Entrega 2 |
+
+### La carga de demo es provisoria
+
+Mientras no exista la cadena de eventos, el índice se puebla al arrancar con
+`CARGAR_DATOS_DEMO=true` (el valor por defecto en `docker compose`). Los
+documentos se arman con el **mismo** `proyector.js` que va a usar el consumidor
+de eventos, así que reemplazar la fuente no cambia lo que ve la búsqueda.
+
+La carga usa `create`: no sobrescribe un documento que ya exista. Un reinicio no
+pisa con precios de demo lo que haya proyectado un evento, y las dos instancias
+la pueden correr a la vez.
+
+### Costo de referencia en el índice
+
+`costo_unitario_final` y `costo_por_watt` de cada oferta son un costo de
+**referencia**: precio de lista menos la bonificación base del fabricante, más
+IVA, **sin flete ni bonificación por volumen**. Sirve para ordenar el catálogo
+y rankear fabricantes. La cotización recalcula con la cantidad y el destino
+reales, que son los que definen esos dos términos.
 
 El cálculo que alimenta la proyección (costo unitario final, costo por Watt y
 ranking) ya está implementado y testeado en

@@ -40,6 +40,7 @@ src/
 │   └── precios.js    cálculo de costo, costo por Watt, ranking (puro)
 └── http/
     ├── rutas-busqueda.js   capacidad pública (contrato)
+    ├── rutas-internas.js   API para otros servicios (no pasa por el gateway)
     └── rutas-metricas.js   métricas Prometheus
 ```
 
@@ -128,7 +129,15 @@ curl "http://localhost:8001/upstreams/precios-upstream/health"
 ## Correr los tests
 
 ```bash
-npm install && npm test        # 18 tests, sin infraestructura
+npm install && npm test        # sin infraestructura
+```
+
+Los de integración necesitan Elasticsearch. Usan un alias descartable, así que
+no tocan el índice del servicio:
+
+```bash
+docker compose up -d elasticsearch
+TEST_ELASTICSEARCH_URL=http://localhost:9200 npm run test:integracion
 ```
 
 ## Estado
@@ -140,5 +149,7 @@ npm install && npm test        # 18 tests, sin infraestructura
 | Validación de parámetros del contrato | Implementada |
 | Endpoint de métricas Prometheus | Implementado |
 | Dos instancias con failover | **Funcionando y verificado** |
+| Índice en Elasticsearch (mapping, alias, carga de demo) | **Implementado y testeado contra Elasticsearch** |
+| `GET /interno/ranking/{sku}` (para la reposición de `stock-service`) | **Implementado** |
 | Endpoints del contrato | Responden `501` apuntando al mock |
-| Proyección al índice y consultas a Elasticsearch | Entrega 2 — ver [`src/projection/`](src/projection/README.md) |
+| Proyección por eventos | Entrega 2 — ver [`src/projection/`](src/projection/README.md) |
