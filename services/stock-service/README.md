@@ -49,6 +49,7 @@ src/
 │   └── reserva.js         las 6 reglas, reposición, unidades libres
 ├── application/         Casos de uso y declaración de puertos
 │   ├── reservar-pedido.js   orquesta la transacción
+│   ├── consultar-disponibilidad.js  lectura informativa, sin bloqueo
 │   └── puertos.js           contratos que el dominio exige al exterior
 ├── adapters/            Implementaciones de los puertos (Entrega 2)
 └── http/                Adaptador de entrada
@@ -111,7 +112,7 @@ los dos clientes creyendo que simplifica — ver
 ## Correr los tests
 
 ```bash
-npm install && npm test        # 14 tests, sin infraestructura
+npm install && npm test        # reglas del dominio y rutas HTTP, sin infraestructura
 ```
 
 Los tests de integración del adaptador PostgreSQL necesitan una base. Cada
@@ -131,7 +132,8 @@ Sin `TEST_DATABASE_URL`, `npm test` los saltea.
 | Esquema completo con restricciones y datos de demo | Listo |
 | Reglas de negocio del dominio | **Implementadas y testeadas** |
 | Caso de uso de reserva (orquestación) | Escrito contra los puertos |
-| Endpoints del contrato | Responden `501` apuntando al mock |
+| `GET /v1/proveedor/disponibilidad` | **Real**, contra PostgreSQL |
+| Resto de los endpoints del contrato | Responden `501` apuntando al mock |
 | Validación de `Idempotency-Key` | Implementada |
 | Simulador de reposición (`/interno/stock/simular-reposicion`) | Implementado |
 | Adaptador PostgreSQL (`RepositorioDeStock`) | **Implementado y testeado contra la base** |

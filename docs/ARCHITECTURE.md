@@ -493,7 +493,7 @@ Esta sección se mantiene actualizada durante todo el proyecto.
 | Cálculo de costo por Watt y ranking de fabricantes | **Implementados y testeados** |
 | Normalización de listas de precios | **Implementada y testeada** |
 | Adaptadores de persistencia, mensajería y HTTP saliente | Pendientes — Entrega 2 |
-| Endpoints del contrato | Responden `501` con `problem+json` apuntando al mock |
+| Endpoints del contrato | `GET /v1/proveedor/disponibilidad` responde contra la base real; el resto, `501` con `problem+json` apuntando al mock |
 | Frontend | Pendiente — presentación grupal |
 | Trazas distribuidas y tablero | Pendientes — Entrega 2 |
 | Pruebas de carga y de contrato | Pendientes — Entrega 2 |

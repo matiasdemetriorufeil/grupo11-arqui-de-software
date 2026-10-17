@@ -28,6 +28,9 @@ const TITULOS = {
   SERVICIO_NO_DISPONIBLE: ['Servicio no disponible', 503, 'servicio-no-disponible'],
 };
 
+/** Sugerencia de espera que acompaña a un 503 (header Retry-After). */
+const SEGUNDOS_PARA_REINTENTAR = 5;
+
 /** Error de dominio que el middleware traduce a una respuesta problem+json. */
 export class ErrorDeDominio extends Error {
   constructor(codigo, detail, extra = {}) {
@@ -67,6 +70,8 @@ export function middlewareDeErrores(log) {
       extra: err.extra,
     });
     if (cuerpo.status >= 500) log.error({ err, correlation_id: req.id }, 'error no manejado');
+    // El contrato declara Retry-After en todo 503: el consumidor sabe cuándo reintentar.
+    if (cuerpo.status === 503) res.set('Retry-After', String(SEGUNDOS_PARA_REINTENTAR));
     res.status(cuerpo.status).type('application/problem+json').json(cuerpo);
   };
 }

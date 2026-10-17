@@ -35,6 +35,9 @@
  *   Abre la transacción, la confirma si el trabajo termina bien y la revierte si
  *   lanza. El nivel de aislamiento es READ COMMITTED: alcanza porque la
  *   exclusión mutua la da el FOR UPDATE sobre las existencias.
+ * @property {(sku: string) => Promise<{sku: string, cantidad_fisica: number, cantidad_reservada: number, multiplo_de_embalaje: number}|null>} existenciaPorSku
+ *   Lectura SIN bloqueo de la existencia del depósito asignado. Sirve para
+ *   consultas informativas: el valor autoritativo se relee bajo lock al reservar.
  * @property {(clave: string) => Promise<object|null>} buscarClaveIdempotencia
  * @property {() => Promise<object[]>} reservasVencidas
  *   Reservas en estado `reservado`/`pendiente_de_pago` cuyo `expira_en` ya pasó.

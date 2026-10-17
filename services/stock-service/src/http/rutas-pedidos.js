@@ -4,10 +4,9 @@
 // Las rutas de este archivo son exactamente las que publica el contrato
 // (docs/contracts/openapi.yaml) y las que el gateway enruta a este servicio.
 //
-// Estado en la Entrega 1: el contrato está cerrado y el mock responde con los
-// ejemplos. La implementación con la transacción real llega en la Entrega 2;
-// mientras tanto estas rutas devuelven 501 con un problem+json que apunta al
-// mock, en lugar de mentir con datos inventados.
+// Estado: `GET /proveedor/disponibilidad` ya responde contra la base real. El
+// resto de las rutas devuelve 501 con un problem+json que apunta al mock hasta
+// que se conecten a su caso de uso, en lugar de mentir con datos inventados.
 // ---------------------------------------------------------------------------
 
 import { Router } from 'express';
@@ -15,12 +14,30 @@ import { ErrorDeDominio, noImplementadoTodavia } from '../problema.js';
 
 const PENDIENTE = noImplementadoTodavia('Entrega 2');
 
-export function routerDePedidos() {
+/** Mismo patrón que el schema `Sku` del contrato. */
+const PATRON_SKU = /^HEL-[A-Z]{3}-[A-Z0-9-]{3,20}$/;
+
+/**
+ * @param {object} casosDeUso
+ * @param {(consulta: {sku: string, cantidad: number}) => Promise<object>} casosDeUso.consultarDisponibilidad
+ */
+export function routerDePedidos({ consultarDisponibilidad }) {
   const router = Router();
 
   // GET /v1/proveedor/disponibilidad?sku=&cantidad=
   // Lectura informativa contra el inventario. No reserva nada.
-  router.get('/proveedor/disponibilidad', exigirParametros(['sku', 'cantidad']), PENDIENTE);
+  router.get(
+    '/proveedor/disponibilidad',
+    exigirParametros(['sku', 'cantidad']),
+    validarConsultaDeDisponibilidad,
+    async (req, res, next) => {
+      try {
+        res.json(await consultarDisponibilidad({ sku: req.query.sku, cantidad: Number(req.query.cantidad) }));
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // POST /v1/pedidos/reservar
   // Operación crítica. Exige Idempotency-Key antes de cualquier otra cosa: sin
@@ -63,6 +80,23 @@ function exigirClaveIdempotencia(req, _res, next) {
     );
   }
   req.claveIdempotencia = clave;
+  next();
+}
+
+/** Valida los parámetros contra el contrato y nombra cada campo inválido. */
+function validarConsultaDeDisponibilidad(req, _res, next) {
+  const errores = [];
+  if (typeof req.query.sku !== 'string' || !PATRON_SKU.test(req.query.sku)) {
+    errores.push({ campo: 'sku', mensaje: 'Debe ser un SKU canónico de Helios (ej. HEL-PAN-550-JKM).' });
+  }
+  if (!/^[1-9][0-9]*$/.test(String(req.query.cantidad))) {
+    errores.push({ campo: 'cantidad', mensaje: 'Debe ser un entero mayor o igual a 1.' });
+  }
+  if (errores.length > 0) {
+    return next(
+      new ErrorDeDominio('SOLICITUD_INVALIDA', 'Parámetros inválidos.', { errores_de_validacion: errores }),
+    );
+  }
   next();
 }
 

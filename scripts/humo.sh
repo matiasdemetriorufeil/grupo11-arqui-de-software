@@ -102,6 +102,11 @@ else
         -H 'Content-Type: application/json' -d '{}')"
 
   echo
+  echo '=== 4b. Primer endpoint real: disponibilidad contra PostgreSQL ==='
+  libres=$(curl -s "${GATEWAY}/v1/proveedor/disponibilidad?sku=HEL-PAN-550-JKM&cantidad=36" -H "${JWT}"     | grep -o '"unidades_libres":[0-9]*' | cut -d: -f2)
+  verificar 'disponibilidad responde con las unidades libres reales' 'true'     "$([[ "${libres}" =~ ^[0-9]+$ ]] && echo true || echo "${libres:-sin respuesta}")"
+
+  echo
   echo '=== 5. Balanceo de carga ==='
   instancias=$(for _ in $(seq 1 10); do
     curl -s -o /dev/null -D- "${GATEWAY}/v1/proveedor/catalogo" -H "${JWT}" \
