@@ -133,9 +133,12 @@ Sin `TEST_DATABASE_URL`, `npm test` los saltea.
 | Reglas de negocio del dominio | **Implementadas y testeadas** |
 | Caso de uso de reserva (orquestación) | Escrito contra los puertos |
 | `GET /v1/proveedor/disponibilidad` | **Real**, contra PostgreSQL |
-| Resto de los endpoints del contrato | Responden `501` apuntando al mock |
+| `POST /v1/pedidos/reservar` y `GET /v1/pedidos/{id}` | **Reales**: flujo cotizar → reservar funcionando de punta a punta |
+| Confirmar y cancelar un pedido | Responden `501` apuntando al mock |
+| Job de expiración de reservas | Pendiente: hoy una reserva vencida sigue bloqueando stock |
+| Publicador de eventos (outbox → RabbitMQ) | Pendiente: los eventos se acumulan en `outbox_evento` sin perderse |
 | Validación de `Idempotency-Key` | Implementada |
 | Simulador de reposición (`/interno/stock/simular-reposicion`) | Implementado |
 | Adaptador PostgreSQL (`RepositorioDeStock`) | **Implementado y testeado contra la base** |
-| Cliente de `pricing-search-service` (timeout, reintento, circuit breaker) | **Implementado y testeado** |
+| Cliente de `pricing-search-service` (timeout, reintento, circuit breaker) | **Implementado y conectado a la reserva** |
 | Adaptadores RabbitMQ y proveedor de pagos | Pendientes — ver [`src/adapters/`](src/adapters/README.md) |

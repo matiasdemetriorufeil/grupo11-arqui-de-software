@@ -295,7 +295,7 @@ describe('repositorio PostgreSQL', { skip: !URL_ADMIN && 'TEST_DATABASE_URL no d
     assert.deepEqual(ordenes, [{ cantidad: 720, origen_del_precio: 'sin_ranking' }]);
   });
 
-  test('dos reservas concurrentes con la misma clave de idempotencia crean una sola', async () => {
+  test('dos reservas concurrentes con la misma clave crean una sola, y la perdedora responde la repetición', async () => {
     const antes = await existencia('HEL-PAN-580-TRN');
     const clave = randomUUID();
     const cuerpo = { cotizacion_id: randomUUID(), lineas: [{ sku: 'HEL-PAN-580-TRN', cantidad: 62 }] };
@@ -306,11 +306,31 @@ describe('repositorio PostgreSQL', { skip: !URL_ADMIN && 'TEST_DATABASE_URL no d
       reservar({ consumidor: 'cliente-reintentador', claveIdempotencia: clave, cuerpo }),
     ]);
 
-    assert.equal(resultados.filter((r) => r.status === 'fulfilled').length, 1);
-    // La perdedora choca contra la PRIMARY KEY y revierte todo lo suyo.
-    const fallida = resultados.find((r) => r.status === 'rejected');
-    assert.equal(fallida.reason.code, '23505');
+    // La perdedora choca contra la PRIMARY KEY, revierte todo lo suyo y
+    // devuelve la respuesta de la ganadora, como un reintento normal (R4.9).
+    assert.ok(resultados.every((r) => r.status === 'fulfilled'), JSON.stringify(resultados));
+    const [a, b] = resultados.map((r) => r.value);
+    assert.deepEqual([a.repetida, b.repetida].sort(), [false, true]);
+    assert.equal(a.cuerpo.pedido_id, b.cuerpo.pedido_id);
     assert.equal((await existencia('HEL-PAN-580-TRN')).cantidad_reservada, antes.cantidad_reservada + 62);
+  });
+
+  test('obtenerReserva devuelve la reserva con sus líneas y el código de depósito', async () => {
+    const reservar = reservarPedidoCon({ cotizacion: cotizacionDe('HEL-INV-50K-SUN', 2, 3000) });
+    const { cuerpo: pedido } = await reservar({
+      consumidor: 'cliente-consulta',
+      claveIdempotencia: randomUUID(),
+      cuerpo: { cotizacion_id: randomUUID(), referencia_externa: 'OC-1', lineas: [{ sku: 'HEL-INV-50K-SUN', cantidad: 2 }] },
+    });
+
+    const reserva = await repositorio.obtenerReserva(pedido.pedido_id);
+    assert.equal(reserva.consumidor, 'cliente-consulta');
+    assert.equal(reserva.estado, 'reservado');
+    assert.equal(reserva.referencia_externa, 'OC-1');
+    assert.deepEqual(reserva.lineas, [
+      { sku: 'HEL-INV-50K-SUN', cantidad: 2, deposito: 'DEP-CBA-01', precio_unitario_congelado: 3000, subtotal: 6000 },
+    ]);
+    assert.equal(await repositorio.obtenerReserva(randomUUID()), null);
   });
 
   // --- Cupo, reposición y expiración ---------------------------------------

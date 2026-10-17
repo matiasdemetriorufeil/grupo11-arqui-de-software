@@ -259,10 +259,13 @@ frontend ni del gateway. Si el proveedor no responde, el pedido queda
 Lo que falta y cuándo llega está en
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § 14 y en [`SPEC.md`](SPEC.md) § 3.
 
-**Los endpoints del contrato responden `501`** con un `problem+json` que apunta al
-mock. Es deliberado: preferimos que el consumidor vea "esto todavía no existe,
-usá el mock" antes que datos inventados por el servicio real, que serían
-indistinguibles de una implementación con bugs.
+**El flujo principal ya funciona contra los servicios reales:** cotizar
+(`POST /v1/proveedor/cotizaciones`), reservar (`POST /v1/pedidos/reservar`),
+consultar el pedido y la disponibilidad. Los endpoints que todavía no están
+implementados (catálogo, confirmar y cancelar) responden `501` con un
+`problem+json` que apunta al mock. Es deliberado: preferimos que el consumidor
+vea "esto todavía no existe, usá el mock" antes que datos inventados por el
+servicio real, que serían indistinguibles de una implementación con bugs.
 
 ---
 

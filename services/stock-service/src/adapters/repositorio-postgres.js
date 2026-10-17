@@ -21,6 +21,7 @@
 import pg from 'pg';
 
 import { ErrorDeDominio } from '../problema.js';
+import { ClaveIdempotenciaEnCarrera } from '../application/errores.js';
 
 /** Estados en los que una reserva sigue ocupando stock y cupo. */
 const ESTADOS_VIGENTES = ['reservado', 'pendiente_de_pago'];
@@ -98,6 +99,29 @@ export function crearRepositorioPostgres({
       return rows[0] ?? null;
     },
 
+    async obtenerReserva(id) {
+      const { rows } = await pool
+        .query(
+          `select r.id, r.consumidor, r.cotizacion_id, r.referencia_externa, r.estado,
+                  r.moneda, r.total, r.creado_en, r.expira_en,
+                  json_agg(json_build_object(
+                    'sku',                       l.sku,
+                    'cantidad',                  l.cantidad,
+                    'deposito',                  d.codigo,
+                    'precio_unitario_congelado', l.precio_unitario_congelado,
+                    'subtotal',                  l.subtotal
+                  ) order by l.id) as lineas
+             from stock.reserva r
+             join stock.reserva_linea l on l.reserva_id = r.id
+             join stock.deposito d on d.id = l.deposito_id
+            where r.id = $1
+            group by r.id`,
+          [id],
+        )
+        .catch(traducirErrorDeConexion);
+      return rows[0] ?? null;
+    },
+
     async buscarClaveIdempotencia(clave) {
       // Una clave vencida es como si no existiera: el consumidor puede reusarla.
       const { rows } = await pool.query(
@@ -155,7 +179,7 @@ function transaccionSobre(cliente, { depositoAsignado, cupoUnidadesPorCliente, v
       if (skus.length === 0) return [];
       // FOR UPDATE OF e: se bloquea la existencia, no el depósito del join.
       const { rows } = await cliente.query(
-        `select e.id, e.producto_id, e.sku, e.deposito_id,
+        `select e.id, e.producto_id, e.sku, e.deposito_id, d.codigo as deposito,
                 e.cantidad_fisica, e.cantidad_reservada,
                 e.stock_minimo, e.punto_de_reposicion,
                 e.lote_de_reposicion, e.multiplo_de_embalaje
@@ -279,13 +303,20 @@ function transaccionSobre(cliente, { depositoAsignado, cupoUnidadesPorCliente, v
     async registrarClaveIdempotencia({ clave, consumidor, operacion, huella_cuerpo, estado_http, respuesta }) {
       // Sin ON CONFLICT a propósito: si otra transacción registró la misma clave
       // en paralelo, la PRIMARY KEY hace fallar ésta y el rollback deshace la
-      // reserva duplicada entera.
-      await cliente.query(
-        `insert into stock.clave_idempotencia
-           (clave, consumidor, operacion, huella_cuerpo, estado_http, respuesta)
-         values ($1, $2, $3, $4, $5, $6)`,
-        [clave, consumidor, operacion, huella_cuerpo, estado_http, JSON.stringify(respuesta)],
-      );
+      // reserva duplicada entera. El caso de uso decide qué responder.
+      try {
+        await cliente.query(
+          `insert into stock.clave_idempotencia
+             (clave, consumidor, operacion, huella_cuerpo, estado_http, respuesta)
+           values ($1, $2, $3, $4, $5, $6)`,
+          [clave, consumidor, operacion, huella_cuerpo, estado_http, JSON.stringify(respuesta)],
+        );
+      } catch (err) {
+        if (err.code === '23505' && err.constraint === 'clave_idempotencia_pkey') {
+          throw new ClaveIdempotenciaEnCarrera(clave);
+        }
+        throw err;
+      }
     },
   };
 }

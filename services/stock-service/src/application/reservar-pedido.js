@@ -29,12 +29,18 @@
 //      outbox dentro de la transacción y un publicador los envía a RabbitMQ
 //      después. Si el broker está caído, el evento no se pierde.
 //
+//   6. Ninguna llamada de red con filas bloqueadas — todo lo que se le pide a
+//      pricing-search-service (cotización y ranking) se resuelve ANTES de
+//      abrir la transacción. Con pricing lento, el costo es latencia para este
+//      pedido, no filas de stock bloqueadas para todos los demás.
+//
 // Decisiones: docs/adr/ADR-005-comunicacion.md, SPEC.md § HU-04.
 // ---------------------------------------------------------------------------
 
 import { createHash } from 'node:crypto';
 import { ErrorDeDominio } from '../problema.js';
 import { planificarReserva } from '../domain/reserva.js';
+import { ClaveIdempotenciaEnCarrera } from './errores.js';
 
 /** Monto mínimo de una orden mayorista, en la moneda de la cotización. */
 const MONTO_MINIMO_POR_DEFECTO = 5000;
@@ -56,18 +62,8 @@ export function crearReservarPedido({ repositorio, precios, eventos, reloj = () 
     const huella = huellaDelCuerpo(cuerpo);
 
     // --- Paso 1: ¿esta operación ya se ejecutó? ----------------------------
-    const previa = await repositorio.buscarClaveIdempotencia(claveIdempotencia);
-    if (previa) {
-      if (previa.huella_cuerpo !== huella) {
-        // Misma clave, cuerpo distinto: el consumidor tiene un bug. Avisarlo es
-        // más útil que devolverle la respuesta de otra operación.
-        throw new ErrorDeDominio(
-          'CLAVE_IDEMPOTENCIA_REUSADA',
-          'La clave de idempotencia ya se usó con un cuerpo diferente.',
-        );
-      }
-      return { estado: previa.estado_http, cuerpo: previa.respuesta, repetida: true };
-    }
+    const previa = await repeticionDe(claveIdempotencia, huella);
+    if (previa) return previa;
 
     // --- Paso 2: recuperar la cotización -----------------------------------
     // Llamada síncrona a pricing-search-service con timeout y circuit breaker
@@ -75,104 +71,147 @@ export function crearReservarPedido({ repositorio, precios, eventos, reloj = () 
     // sin precio firme no se puede reservar, así que se devuelve 503.
     const cotizacion = await precios.obtenerCotizacion(cuerpo.cotizacion_id, { consumidor, correlationId });
     if (!cotizacion) {
-      throw new ErrorDeDominio('NO_ENCONTRADO', 'La cotización no existe para este consumidor.');
+      // El contrato agrupa "no existe, no es tuya o venció" en la regla 1: para
+      // el consumidor, la acción es la misma (volver a cotizar).
+      throw new ErrorDeDominio(
+        'COTIZACION_EXPIRADA',
+        'La cotización no existe para este consumidor. Hay que volver a cotizar.',
+      );
     }
 
-    // --- Paso 3: la transacción --------------------------------------------
-    const resultado = await repositorio.enTransaccion(async (tx) => {
-      // Orden estable de bloqueo: evita deadlocks entre pedidos concurrentes.
-      const skus = [...new Set(cuerpo.lineas.map((l) => l.sku))].sort();
-      const existencias = await tx.bloquearExistenciasPorSku(skus);
-      const existenciasPorSku = new Map(existencias.map((e) => [e.sku, e]));
+    // --- Paso 3: ranking para una eventual reposición ----------------------
+    // Todavía no se sabe qué líneas van a cruzar el punto de reposición (eso
+    // se decide con las filas bloqueadas), así que se pide para todas, en
+    // paralelo. Nunca lanza: si pricing falla, la orden sale sin fabricante.
+    const skus = [...new Set(cuerpo.lineas.map((l) => l.sku))].sort();
+    const rankingPorSku = new Map(
+      await Promise.all(
+        skus.map(async (sku) => [
+          sku,
+          await precios.mejorFabricantePorCostoPorWatt(sku, { correlationId }).catch(() => null),
+        ]),
+      ),
+    );
 
-      const cupo = await tx.obtenerCupoVigente(consumidor);
+    // --- Paso 4: la transacción --------------------------------------------
+    let resultado;
+    try {
+      resultado = await repositorio.enTransaccion(async (tx) => {
+        // Orden estable de bloqueo: evita deadlocks entre pedidos concurrentes.
+        const existencias = await tx.bloquearExistenciasPorSku(skus);
+        const existenciasPorSku = new Map(existencias.map((e) => [e.sku, e]));
 
-      // Toda la decisión de negocio ocurre acá, sobre datos ya bloqueados.
-      const decision = planificarReserva({
-        cotizacion,
-        lineasPedidas: cuerpo.lineas,
-        existenciasPorSku,
-        cupo,
-        montoMinimo: Number(process.env.MONTO_MINIMO_ORDEN ?? MONTO_MINIMO_POR_DEFECTO),
-        ahora: reloj(),
-      });
+        const cupo = await tx.obtenerCupoVigente(consumidor);
 
-      if (!decision.aprobada) {
-        // Lanzar aborta la transacción: no queda nada a medias.
-        throw errorDesdeDecision(decision);
-      }
-
-      const reserva = await tx.crearReserva({
-        consumidor,
-        cotizacion_id: cuerpo.cotizacion_id,
-        referencia_externa: cuerpo.referencia_externa ?? null,
-        moneda: decision.plan.moneda,
-        total: decision.plan.total,
-        expira_en: new Date(
-          reloj().getTime() + Number(process.env.MINUTOS_VIGENCIA_RESERVA ?? 15) * 60_000,
-        ),
-        lineas: decision.plan.lineas,
-      });
-
-      // Compromiso del stock + asiento en el libro mayor, por línea.
-      for (const linea of decision.plan.lineas) {
-        await tx.comprometerStock({
-          existencia_id: linea.existencia_id,
-          cantidad: linea.cantidad,
-          reserva_id: reserva.id,
+        // Toda la decisión de negocio ocurre acá, sobre datos ya bloqueados.
+        const decision = planificarReserva({
+          cotizacion,
+          lineasPedidas: cuerpo.lineas,
+          existenciasPorSku,
+          cupo,
+          montoMinimo: Number(process.env.MONTO_MINIMO_ORDEN ?? MONTO_MINIMO_POR_DEFECTO),
+          ahora: reloj(),
         });
-      }
 
-      // Consecuencia de negocio: órdenes de reposición al fabricante más barato.
-      for (const reposicion of decision.plan.reposiciones) {
-        const mejor = await precios
-          .mejorFabricantePorCostoPorWatt(reposicion.sku, { correlationId })
-          .catch(() => null);
-        await tx.registrarOrdenDeReposicion({
-          ...reposicion,
-          fabricante_elegido: mejor?.fabricante ?? null,
-          costo_unitario: mejor?.costo_unitario ?? null,
-          costo_por_watt: mejor?.costo_por_watt ?? null,
-          // Se deja constancia de que el ranking no estaba disponible, en lugar
-          // de abortar la reserva por una falla de una dependencia secundaria.
-          origen_del_precio: mejor ? mejor.origen : 'sin_ranking',
+        if (!decision.aprobada) {
+          // Lanzar aborta la transacción: no queda nada a medias.
+          throw errorDesdeDecision(decision);
+        }
+
+        const reserva = await tx.crearReserva({
+          consumidor,
+          cotizacion_id: cuerpo.cotizacion_id,
+          referencia_externa: cuerpo.referencia_externa ?? null,
+          moneda: decision.plan.moneda,
+          total: decision.plan.total,
+          expira_en: new Date(
+            reloj().getTime() + Number(process.env.MINUTOS_VIGENCIA_RESERVA ?? 15) * 60_000,
+          ),
+          lineas: decision.plan.lineas,
         });
+
+        // Compromiso del stock + asiento en el libro mayor, por línea.
+        for (const linea of decision.plan.lineas) {
+          await tx.comprometerStock({
+            existencia_id: linea.existencia_id,
+            cantidad: linea.cantidad,
+            reserva_id: reserva.id,
+          });
+        }
+
+        // Consecuencia de negocio: órdenes de reposición al fabricante más barato.
+        for (const reposicion of decision.plan.reposiciones) {
+          const mejor = rankingPorSku.get(reposicion.sku);
+          await tx.registrarOrdenDeReposicion({
+            ...reposicion,
+            fabricante_elegido: mejor?.fabricante ?? null,
+            costo_unitario: mejor?.costo_unitario ?? null,
+            costo_por_watt: mejor?.costo_por_watt ?? null,
+            // Se deja constancia de que el ranking no estaba disponible, en lugar
+            // de abortar la reserva por una falla de una dependencia secundaria.
+            origen_del_precio: mejor ? mejor.origen : 'sin_ranking',
+          });
+
+          await tx.encolarEvento({
+            tipo: 'stock.bajo_minimo',
+            clave_agregado: reposicion.sku,
+            cuerpo: reposicion,
+          });
+        }
 
         await tx.encolarEvento({
-          tipo: 'stock.bajo_minimo',
-          clave_agregado: reposicion.sku,
-          cuerpo: reposicion,
+          tipo: 'pedido.reservado',
+          clave_agregado: reserva.id,
+          cuerpo: { pedido_id: reserva.id, consumidor, total: decision.plan.total },
         });
+
+        const respuesta = aRepresentacionPublica(reserva, decision.plan, existenciasPorSku);
+
+        // El registro de la clave va en la MISMA transacción que la reserva.
+        await tx.registrarClaveIdempotencia({
+          clave: claveIdempotencia,
+          consumidor,
+          operacion: 'POST /v1/pedidos/reservar',
+          huella_cuerpo: huella,
+          estado_http: 201,
+          respuesta,
+        });
+
+        return respuesta;
+      });
+    } catch (err) {
+      // Un reintento del consumidor llegó en paralelo con la misma clave y
+      // ganó la carrera. Esta transacción ya se revirtió: se responde lo mismo
+      // que respondió la ganadora, como si fuera un reintento normal (R4.9).
+      if (err instanceof ClaveIdempotenciaEnCarrera) {
+        const ganadora = await repeticionDe(claveIdempotencia, huella);
+        if (ganadora) return ganadora;
       }
+      throw err;
+    }
 
-      await tx.encolarEvento({
-        tipo: 'pedido.reservado',
-        clave_agregado: reserva.id,
-        cuerpo: { pedido_id: reserva.id, consumidor, total: decision.plan.total },
-      });
-
-      const respuesta = aRepresentacionPublica(reserva, decision.plan);
-
-      // El registro de la clave va en la MISMA transacción que la reserva.
-      await tx.registrarClaveIdempotencia({
-        clave: claveIdempotencia,
-        consumidor,
-        operacion: 'POST /v1/pedidos/reservar',
-        huella_cuerpo: huella,
-        estado_http: 201,
-        respuesta,
-      });
-
-      return respuesta;
-    });
-
-    // --- Paso 4: publicar lo que quedó en el outbox ------------------------
+    // --- Paso 5: publicar lo que quedó en el outbox ------------------------
     // Fuera de la transacción y sin afectar la respuesta: si falla, el
     // publicador periódico reintenta. La reserva ya está confirmada.
     eventos.vaciarOutboxEnSegundoPlano();
 
     return { estado: 201, cuerpo: resultado, repetida: false };
   };
+
+  /** La respuesta original si la clave ya se usó con este mismo cuerpo. */
+  async function repeticionDe(claveIdempotencia, huella) {
+    const previa = await repositorio.buscarClaveIdempotencia(claveIdempotencia);
+    if (!previa) return null;
+    if (previa.huella_cuerpo !== huella) {
+      // Misma clave, cuerpo distinto: el consumidor tiene un bug. Avisarlo es
+      // más útil que devolverle la respuesta de otra operación.
+      throw new ErrorDeDominio(
+        'CLAVE_IDEMPOTENCIA_REUSADA',
+        'La clave de idempotencia ya se usó con un cuerpo diferente.',
+      );
+    }
+    return { estado: previa.estado_http, cuerpo: previa.respuesta, repetida: true };
+  }
 }
 
 function errorDesdeDecision(decision) {
@@ -197,7 +236,7 @@ function errorDesdeDecision(decision) {
   });
 }
 
-function aRepresentacionPublica(reserva, plan) {
+function aRepresentacionPublica(reserva, plan, existenciasPorSku) {
   return {
     pedido_id: reserva.id,
     estado: 'reservado',
@@ -206,6 +245,7 @@ function aRepresentacionPublica(reserva, plan) {
     lineas: plan.lineas.map((l) => ({
       sku: l.sku,
       cantidad: l.cantidad,
+      deposito: existenciasPorSku.get(l.sku).deposito,
       precio_unitario_congelado: { monto: l.precio_unitario_congelado.toFixed(2), moneda: plan.moneda },
       subtotal: { monto: l.subtotal.toFixed(2), moneda: plan.moneda },
     })),
