@@ -53,7 +53,7 @@ historia de las decisiones es parte de la documentación.
 
 | Tema | ADR | Qué falta decidir |
 |---|---|---|
-| Persistencia de las cotizaciones | [ADR-003](ADR-003-persistencia.md) | Redis con TTL o tabla propia. Impacta en qué pasa si el servicio reinicia. |
+| ~~Persistencia de las cotizaciones~~ | [ADR-003](ADR-003-persistencia.md) | **Resuelto: Redis**, retenidas 24 h con vigencia de 15 min. Perder una cotización vigente sólo obliga a recotizar; el precio de una reserva lo congela `stock-service` en su base. Formalizar en el ADR de la Entrega 2. |
 | Herramienta de migraciones | [ADR-003](ADR-003-persistencia.md) | Hoy el esquema se crea sólo en base vacía. |
 | Elasticsearch vs. Meilisearch | [ADR-003](ADR-003-persistencia.md) | Reversible si la memoria resulta un problema. |
 | Webhooks al consumidor | [ADR-008](ADR-008-contrato-propio.md) | `pedido.estado_cambiado` para evitar polling. Cambio aditivo. |
