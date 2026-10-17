@@ -26,8 +26,16 @@ import { sondaDesdeUrl, sondaHttp } from './sondas.js';
 import { middlewareDeErrores } from './problema.js';
 import { routerDeBusqueda } from './http/rutas-busqueda.js';
 import { routerDeMetricas } from './http/rutas-metricas.js';
+import { routerInterno } from './http/rutas-internas.js';
+import { crearClienteElasticsearch } from './elasticsearch.js';
+import { asegurarIndice } from './projection/mapeo-indice.js';
+import { cargarDatosDemo } from './projection/datos-demo.js';
+import { crearConsultaDeRanking } from './query/ranking.js';
 
 const PUERTO = Number(process.env.PUERTO ?? 3003);
+
+const es = crearClienteElasticsearch();
+const mejorFabricante = crearConsultaDeRanking({ es });
 
 const app = express();
 app.disable('x-powered-by');
@@ -52,6 +60,9 @@ app.use(
 // Capacidad pública: catálogo y cotizaciones (docs/contracts/openapi.yaml).
 app.use('/v1', routerDeBusqueda());
 
+// API interna para otros servicios (tráfico este-oeste, no pasa por el gateway).
+app.use(routerInterno({ mejorFabricante }));
+
 // Métricas en formato Prometheus, para el tablero de observabilidad.
 app.use(routerDeMetricas());
 
@@ -59,12 +70,33 @@ app.use(middlewareDeErrores(log));
 
 const servidor = app.listen(PUERTO, () => {
   log.info({ puerto: PUERTO, patron_interno: 'cqrs' }, `${SERVICIO} (${INSTANCIA}) escuchando`);
+  prepararIndice();
 });
+
+/**
+ * Crea el índice si no existe y, en desarrollo, lo puebla con datos de demo.
+ * No bloquea el arranque: si Elasticsearch todavía no responde, reintenta. Las
+ * dos instancias lo corren a la vez y es seguro (ver asegurarIndice y
+ * cargarDatosDemo).
+ */
+async function prepararIndice(intento = 1) {
+  try {
+    const creado = await asegurarIndice(es);
+    log.info({ creado }, 'índice de productos listo');
+    if (process.env.CARGAR_DATOS_DEMO === 'true') {
+      log.info(await cargarDatosDemo(es), 'datos de demo cargados en el índice');
+    }
+  } catch (err) {
+    const esperaMs = Math.min(intento * 2000, 30_000);
+    log.warn({ err, intento, espera_ms: esperaMs }, 'no se pudo preparar el índice; se reintenta');
+    setTimeout(() => prepararIndice(intento + 1), esperaMs).unref();
+  }
+}
 
 for (const senal of ['SIGTERM', 'SIGINT']) {
   process.on(senal, () => {
     log.info({ senal }, 'apagado ordenado iniciado');
-    servidor.close(() => process.exit(0));
+    servidor.close(() => es.close().finally(() => process.exit(0)));
     setTimeout(() => process.exit(1), 10_000).unref();
   });
 }
